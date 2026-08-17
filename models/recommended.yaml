@@ -1,0 +1,68 @@
+# AI Workstation model recommendations by VPS configuration
+# Used by: mb ai model recommend
+# Format: recommendations[].profile + recommendations[].models[]
+# Each model: name (ollama tag), size (approx download), description
+
+recommendations:
+  - profile: "2GB RAM / CPU"
+    models:
+      - name: qwen2.5:0.5b
+        size: "~500MB"
+        description: "Lightweight chat, good for testing"
+      - name: llama3.2:1b
+        size: "~1.3GB"
+        description: "Smallest Llama, basic conversations"
+
+  - profile: "4GB RAM / CPU"
+    models:
+      - name: phi3:mini
+        size: "~2.3GB"
+        description: "Microsoft Phi-3, great quality per parameter"
+      - name: qwen2.5:1.5b
+        size: "~1GB"
+        description: "Qwen 1.5B, fast and capable"
+
+  - profile: "8GB RAM / CPU"
+    models:
+      - name: llama3.2:3b
+        size: "~2GB"
+        description: "Balanced choice for CPU"
+      - name: qwen2.5:3b
+        size: "~2GB"
+        description: "Qwen 3B, strong reasoning"
+
+  - profile: "16GB RAM / CPU"
+    models:
+      - name: llama3.1:8b
+        size: "~4.7GB"
+        description: "Best CPU experience with Q4 quantization"
+      - name: qwen2.5:7b
+        size: "~4.7GB"
+        description: "Qwen 7B, excellent multilingual"
+
+  - profile: "8GB VRAM / GPU"
+    models:
+      - name: llama3.1:8b
+        size: "~4.7GB"
+        description: "GPU accelerated, fast inference"
+      - name: qwen2.5:7b
+        size: "~4.7GB"
+        description: "GPU accelerated, multilingual"
+
+  - profile: "16GB VRAM / GPU"
+    models:
+      - name: qwen2.5:14b
+        size: "~9GB"
+        description: "Mid-size GPU, high quality"
+      - name: llama3.1:13b
+        size: "~7.4GB"
+        description: "Llama 13B on GPU"
+
+  - profile: "24GB+ VRAM / GPU"
+    models:
+      - name: qwen2.5:32b
+        size: "~20GB"
+        description: "Large model, needs 24GB+ VRAM"
+      - name: llama3.1:70b
+        size: "~40GB"
+        description: "Largest, needs 48GB+ VRAM (Q4)"

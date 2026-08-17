@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# mb - AI Workstation CLI
+# Deploy and manage a self-hosted Ollama + Open WebUI stack on a VPS.
+# Part of the 0x10debug VPS tool suite.
+#
+# Usage:  mb ai <command> [args]
+#         mb ai help
+
+set -euo pipefail
+
+MB_AI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "${MB_AI_DIR}/lib/common.sh"
+# shellcheck source=lib/gpu.sh
+source "${MB_AI_DIR}/lib/gpu.sh"
+# shellcheck source=lib/model.sh
+source "${MB_AI_DIR}/lib/model.sh"
+
+# =====================================================================
+# Commands
+# =====================================================================
+
+mb_ai_deploy() {
+    local mode=""
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu) mode="gpu"; shift ;;
+            --cpu) mode="cpu"; shift ;;
+            *) mb_die "Unknown option: $1 (use --gpu or --cpu)" ;;
+        esac
+    done
+
+    mb_check_docker
+
+    # Interactive selection if no flag given
+    if [[ -z "${mode}" ]]; then
+        mb_step "Choose deployment mode"
+        if mb_gpu_check; then
+            mb_info "NVIDIA GPU detected:"
+            mb_gpu_info | sed 's/^/    /'
+            if mb_ask "Deploy GPU version?"; then
+                mode="gpu"
+            else
+                mode="cpu"
+            fi
+        else
+            mb_info "No NVIDIA GPU detected; defaulting to CPU mode."
+            mode="cpu"
+        fi
+    fi
+
+    local compose_file env_file
+    compose_file=$(mb_compose_file "${mode}")
+    env_file=$(mb_env_file)
+
+    # Generate .env if missing
+    if [[ ! -f "${env_file}" ]]; then
+        mb_step "Generating ${env_file} from .env.example"
+        cp "${MB_COMPOSE_DIR}/.env.example" "${env_file}"
+        local domain
+        domain=$(mb_ask_value "Domain for Open WebUI (leave empty to skip Caddy setup)" "")
+        if [[ -n "${domain}" ]]; then
+            if grep -q '^AI_DOMAIN=$' "${env_file}"; then
+                sed -i.bak "s/^AI_DOMAIN=$/AI_DOMAIN=${domain}/" "${env_file}" && rm -f "${env_file}.bak"
+            fi
+            mb_success "AI_DOMAIN set to ${domain}"
+        else
+            mb_info "No domain set. You can edit ${env_file} later."
+        fi
+    else
+        mb_info "Using existing ${env_file}"
+    fi
+
+    # Ensure mb-proxy network exists
+    if ! docker network ls --format '{{.Name}}' | grep -qx "${MB_PROXY_NETWORK:-mb-proxy}"; then
+        mb_warn "Docker network '${MB_PROXY_NETWORK:-mb-proxy}' not found."
+        mb_info "Creating it now (or install mb-proxy for full reverse-proxy management)."
+        docker network create "${MB_PROXY_NETWORK:-mb-proxy}" >/dev/null
+        mb_success "Created network '${MB_PROXY_NETWORK:-mb-proxy}'"
+    fi
+
+    # Create data directories
+    mb_step "Preparing data directories"
+    sudo mkdir -p /data/ollama /data/open-webui
+    sudo chown -R "$(id -u):$(id -g)" /data/ollama /data/open-webui 2>/dev/null || true
+    mb_success "Data directories ready (/data/ollama, /data/open-webui)"
+
+    # Pull and start
+    mb_step "Deploying ${mode^^} stack"
+    docker compose -f "${compose_file}" --env-file "${env_file}" pull
+    docker compose -f "${compose_file}" --env-file "${env_file}" up -d
+
+    mb_success "AI Workstation deployed (${mode})"
+    mb_detail "Open WebUI: http://localhost:${OPEN_WEBUI_PORT:-3000}"
+    mb_detail "Ollama API: http://localhost:${OLLAMA_PORT:-11434}"
+    mb_detail "Pull a model:  mb ai model pull llama3.1:8b"
+    mb_detail "Recommend:     mb ai model recommend"
+}
+
+mb_ai_status() {
+    mb_check_docker
+    mb_step "AI Workstation status"
+
+    echo
+    mb_info "Containers:"
+    for c in ollama open-webui; do
+        local state
+        state=$(docker inspect -f '{{.State.Status}}' "${c}" 2>/dev/null || echo "absent")
+        if [[ "${state}" == "running" ]]; then
+            printf '  %s%-14s%s running %s(healthy)%s\n' "${MB_C_GREEN}" "${c}" "${MB_C_RESET}" "${MB_C_GREEN}" "${MB_C_RESET}"
+        else
+            printf '  %s%-14s%s %s\n' "${MB_C_RED}" "${c}" "${MB_C_RESET}" "${state}"
+        fi
+    done
+
+    echo
+    if mb_gpu_check; then
+        mb_info "GPU:"
+        mb_gpu_info | sed 's/^/  /'
+        echo
+        if docker ps --format '{{.Names}}' | grep -qx ollama; then
+            mb_info "GPU usage (Ollama):"
+            docker exec ollama nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total \
+                --format=csv,noheader 2>/dev/null | sed 's/^/  /' || mb_detail "(nvidia-smi not available in container)"
+        fi
+    else
+        mb_info "GPU: none (CPU mode)"
+    fi
+
+    echo
+    if docker ps --format '{{.Names}}' | grep -qx ollama; then
+        local count
+        count=$(docker exec ollama ollama list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+        mb_info "Models installed: ${count}"
+        if (( count > 0 )); then
+            docker exec ollama ollama list 2>/dev/null | sed 's/^/  /'
+        fi
+    else
+        mb_info "Models: (ollama not running)"
+    fi
+}
+
+mb_ai_model() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift
+    case "${sub}" in
+        list)     mb_model_list "$@" ;;
+        pull)     mb_model_pull "$@" ;;
+        remove)   mb_model_remove "$@" ;;
+        rm)       mb_model_remove "$@" ;;
+        recommend) mb_model_recommend "$@" ;;
+        *)        mb_die "Usage: mb ai model <list|pull|remove|recommend> [args]" ;;
+    esac
+}
+
+mb_ai_api() {
+    local action="${1:-}"
+    [[ $# -gt 0 ]] && shift
+    local caddyfile="${MB_COMPOSE_DIR}/Caddyfile"
+    local env_file=$(mb_env_file)
+
+    case "${action}" in
+        enable)
+            mb_step "Enabling OpenAI-compatible API"
+            if [[ ! -f "${caddyfile}" ]]; then
+                cp "${MB_COMPOSE_DIR}/Caddyfile.example" "${caddyfile}"
+                mb_info "Created ${caddyfile} from example"
+            fi
+            # Uncomment the /v1/ route block
+            if grep -q '^	# @api path' "${caddyfile}" 2>/dev/null; then
+                sed -i.bak \
+                    -e 's/^	# @api path/	@api path/' \
+                    -e 's/^	# handle @api {/	handle @api {/' \
+                    -e 's/^	# 	# @authorized header/		# @authorized header/' \
+                    -e 's/^	# 	# handle @authorized {/		# handle @authorized {/' \
+                    -e 's/^	# 		reverse_proxy ollama:11434/			reverse_proxy ollama:11434/' \
+                    -e 's/^	# 	# }/		# }/' \
+                    -e 's/^	# 	# respond 401/		# respond 401/' \
+                    -e 's/^	# }/	}/' \
+                    "${caddyfile}" && rm -f "${caddyfile}.bak"
+                mb_success "API route enabled in ${caddyfile}"
+            else
+                mb_info "API route already enabled (or Caddyfile structure differs)."
+            fi
+            # Ensure API_KEY is set
+            if ! grep -q '^API_KEY=.' "${env_file}" 2>/dev/null; then
+                local key
+                key=$(openssl rand -hex 24 2>/dev/null || echo "changeme-$(date +%s)")
+                if grep -q '^# API_KEY=' "${env_file}"; then
+                    sed -i.bak "s|^# API_KEY=.*|API_KEY=${key}|" "${env_file}" && rm -f "${env_file}.bak"
+                else
+                    echo "API_KEY=${key}" >> "${env_file}"
+                fi
+                mb_success "Generated API_KEY in ${env_file}"
+                mb_detail "Key: ${key}"
+            else
+                mb_info "API_KEY already set in ${env_file}"
+            fi
+            mb_info "Reload Caddy to apply:  caddy reload --config ${caddyfile}"
+            mb_detail "Endpoint: https://<your-domain>/v1/chat/completions"
+            ;;
+        disable)
+            mb_step "Disabling OpenAI-compatible API"
+            if [[ -f "${caddyfile}" ]] && grep -q '^	@api path' "${caddyfile}" 2>/dev/null; then
+                sed -i.bak \
+                    -e 's/^	@api path/	# @api path/' \
+                    -e 's/^	handle @api {/	# handle @api {/' \
+                    "${caddyfile}" && rm -f "${caddyfile}.bak"
+                mb_success "API route disabled in ${caddyfile}"
+                mb_info "Reload Caddy to apply:  caddy reload --config ${caddyfile}"
+            else
+                mb_info "API route is already disabled (or Caddyfile not present)."
+            fi
+            ;;
+        *)
+            mb_die "Usage: mb ai api <enable|disable>"
+            ;;
+    esac
+}
+
+mb_ai_gpu() {
+    local sub="${1:-}"
+    case "${sub}" in
+        check)
+            if mb_gpu_check; then
+                mb_success "NVIDIA GPU available"
+                mb_gpu_info
+            else
+                mb_warn "No NVIDIA GPU detected (nvidia-smi missing or no GPU)"
+                mb_detail "CPU-only deployment will be used."
+                return 1
+            fi
+            ;;
+        *) mb_die "Usage: mb ai gpu check" ;;
+    esac
+}
+
+mb_ai_update() {
+    mb_check_docker
+    local env_file=$(mb_env_file)
+    local mode="cpu"
+    if mb_gpu_check && docker inspect ollama >/dev/null 2>&1; then
+        if docker inspect ollama 2>/dev/null | grep -q nvidia; then
+            mode="gpu"
+        fi
+    fi
+    # Detect from running container if possible
+    if docker ps --format '{{.Names}}' | grep -qx ollama; then
+        if docker inspect ollama 2>/dev/null | grep -q '"Driver": "nvidia"'; then
+            mode="gpu"
+        fi
+    fi
+    local compose_file
+    compose_file=$(mb_compose_file "${mode}")
+    mb_step "Updating AI Workstation images (${mode})"
+    mb_info "Pulling latest images..."
+    docker compose -f "${compose_file}" --env-file "${env_file}" pull
+    mb_info "Recreating containers..."
+    docker compose -f "${compose_file}" --env-file "${env_file}" up -d
+    mb_success "AI Workstation updated"
+}
+
+mb_ai_rag() {
+    local sub="${1:-}"
+    case "${sub}" in
+        setup)
+            bash "${MB_RAG_DIR}/rag-setup.sh" "$@"
+            ;;
+        *) mb_die "Usage: mb ai rag setup" ;;
+    esac
+}
+
+mb_ai_help() {
+    cat <<'HELP'
+mb ai - Self-hosted AI Workstation (Ollama + Open WebUI)
+
+USAGE
+  mb ai <command> [args]
+
+COMMANDS
+  deploy              Interactive deploy (asks CPU/GPU)
+    --gpu             Deploy GPU version
+    --cpu             Deploy CPU version
+  status              Show workstation status (containers, GPU, models)
+  model list          List installed models
+  model pull <m>      Pull a model (e.g. llama3.1:8b)
+  model remove <m>    Remove a model
+  model recommend     Recommend models based on VPS config
+  api enable          Enable OpenAI-compatible API (/v1/ route + API key)
+  api disable         Disable the API
+  gpu check           Check NVIDIA GPU availability
+  update              Update AI components (pull + recreate)
+  rag setup           Set up RAG (Chroma + Open WebUI integration)
+  help                Show this help
+
+EXAMPLES
+  mb ai deploy --gpu
+  mb ai model pull qwen2.5:7b
+  mb ai model recommend
+  mb ai api enable
+  mb ai status
+
+Part of the 0x10debug VPS tool suite.
+HELP
+}
+
+# =====================================================================
+# Dispatcher
+# =====================================================================
+
+main() {
+    # The CLI namespace is `mb ai <command>`. Accept an optional leading `ai`
+    # token so both `mb ai deploy` and `mb deploy` work.
+    if [[ "${1:-}" == "ai" ]]; then
+        shift
+    fi
+
+    local cmd="${1:-help}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${cmd}" in
+        deploy)    mb_ai_deploy "$@" ;;
+        status)    mb_ai_status "$@" ;;
+        model)     mb_ai_model "$@" ;;
+        api)       mb_ai_api "$@" ;;
+        gpu)       mb_ai_gpu "$@" ;;
+        update)    mb_ai_update "$@" ;;
+        rag)       mb_ai_rag "$@" ;;
+        help|-h|--help) mb_ai_help ;;
+        *)         mb_error "Unknown command: ${cmd}"; echo; mb_ai_help; exit 1 ;;
+    esac
+}
+
+main "$@"

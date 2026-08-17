@@ -1,0 +1,54 @@
+# AI Workstation Caddyfile
+# Reverse proxy for Open WebUI + Ollama API
+#
+# Place in your Caddy config directory (managed by mb-proxy) and reload Caddy:
+#   caddy reload --config /etc/caddy/Caddyfile
+#
+# Requires AI_DOMAIN to be set in compose/.env
+
+# ---- Security headers (applied to all routes) ----
+(header) {
+	header {
+		# HSTS
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		# Clickjacking protection
+		X-Frame-Options "SAMEORIGIN"
+		# MIME sniffing protection
+		X-Content-Type-Options "nosniff"
+		# Referrer policy
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Permissions policy
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		# Remove server identification
+		-Server
+	}
+}
+
+{$AI_DOMAIN} {
+	import header
+
+	# ---- Basic auth (optional) ----
+	# Uncomment and generate a hash with: caddy hash-password
+	# Then restrict access to the whole site:
+	# basicauth {
+	# 	admin <hashed-password>
+	# }
+
+	# ---- Open WebUI ----
+	reverse_proxy open-webui:8080
+
+	# ---- OpenAI-compatible API (disabled by default) ----
+	# Enable with:  mb ai api enable
+	# This exposes Ollama's API at /v1/ for use by external apps.
+	# Protect it with an API key (set API_KEY in compose/.env).
+	#
+	# @api path /v1/* /api/*
+	# handle @api {
+	# 	# Optional: require Bearer token matching API_KEY
+	# 	# @authorized header Authorization "Bearer {$API_KEY}"
+	# 	# handle @authorized {
+	# 		reverse_proxy ollama:11434
+	# 	# }
+	# 	# respond 401
+	# }
+}

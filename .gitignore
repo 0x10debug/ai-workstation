@@ -1,0 +1,29 @@
+# Dev docs and agent files
+dev-docs/
+AGENTS.md
+.devin/
+
+# Numbered dev-docs (0000-9999)
+[0-9][0-9][0-9][0-9]-*.md
+[0-9][0-9][0-9][0-9][0-9]-*.md
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Environment files (keep .env.example)
+.env
+.env.local
+.env.*.local
+compose/.env
