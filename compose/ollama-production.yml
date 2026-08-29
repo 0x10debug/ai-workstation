@@ -1,0 +1,105 @@
+# AI Workstation - Ollama production deployment
+# Hardened, pinned-tag Ollama service for production VPS use.
+# Part of the 0x10debug VPS tool suite
+#
+# Hardening summary:
+#   - Pinned image tag (ollama/ollama:0.3.14) — no floating `latest`
+#   - API port bound to 127.0.0.1 only — never exposed to the public internet
+#   - Healthcheck via /api/version
+#   - restart: unless-stopped
+#   - Log rotation to prevent disk exhaustion
+#   - Tunable concurrency / VRAM / keep-alive via environment variables
+#   - GPU support gated behind the `gpu` compose profile (opt-in)
+#
+# The CPU and GPU variants are mutually exclusive compose profiles so they
+# never collide on the `ollama` container name. The GPU service publishes a
+# network alias `ollama` so Open WebUI's OLLAMA_BASE_URL=http://ollama:11434
+# resolves regardless of which variant is running.
+#
+# Usage (CPU):
+#   docker compose -f compose/ollama-production.yml --profile cpu \
+#       --env-file compose/.env up -d
+#
+# Usage (GPU):
+#   docker compose -f compose/ollama-production.yml --profile gpu \
+#       --env-file compose/.env up -d
+#
+# The `mb ai ollama-prod deploy --cpu|--gpu` wrapper selects the profile for you.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+
+volumes:
+  ollama-models:
+
+x-ollama-common: &ollama-common
+  image: ollama/ollama:0.3.14
+  container_name: ollama
+  restart: unless-stopped
+  ports:
+    # Bind to loopback only — expose publicly only through a reverse proxy
+    # (Caddy/Traefik from network-toolkit) with authentication.
+    - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
+  volumes:
+    - ollama-models:/root/.ollama
+  environment:
+    # Maximum number of models kept loaded in memory simultaneously.
+    # Lower this on memory-constrained hosts to avoid OOM.
+    OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
+    # Number of concurrent inference requests Ollama will queue/serve.
+    # Higher values improve throughput but raise peak memory use.
+    OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+    # Cap VRAM Ollama is allowed to use (in bytes). 0 = use all available.
+    # Set explicitly when sharing the GPU with other workloads.
+    OLLAMA_MAX_VRAM: ${OLLAMA_MAX_VRAM:-0}
+    # How long a model stays resident in memory after the last request.
+    # Examples: "5m", "30m", "2h", "-1" (never unload), "0" (unload immediately).
+    OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/version || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  deploy:
+    resources:
+      limits:
+        memory: ${OLLAMA_MEMORY_LIMIT:-16g}
+
+services:
+  # CPU variant — selected with `--profile cpu`.
+  ollama:
+    <<: *ollama-common
+    profiles:
+      - cpu
+    networks:
+      - mb-proxy
+
+  # GPU variant — selected with `--profile gpu`. Shares the `ollama` container
+  # name and publishes a network alias `ollama` so downstream services (Open
+  # WebUI) reach it at http://ollama:11434 just like the CPU variant.
+  ollama-gpu:
+    <<: *ollama-common
+    profiles:
+      - gpu
+    networks:
+      mb-proxy:
+        aliases:
+          - ollama
+    deploy:
+      resources:
+        limits:
+          memory: ${OLLAMA_MEMORY_LIMIT:-16g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu

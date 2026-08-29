@@ -7,6 +7,7 @@ Part of the [0x10debug](https://github.com/0x10debug) VPS tool suite.
 ## Features
 
 - **One-command deploy** — `./mb ai deploy` boots Ollama + Open WebUI
+- **Production hardening** — pinned tags, loopback port binding, healthchecks, log rotation, GPU profile
 - **CPU and GPU** — auto-detects NVIDIA GPUs; same image, auto-acceleration
 - **Self-hosted ChatGPT** — Open WebUI gives a polished chat interface
 - **OpenAI-compatible API** — drop-in base URL for Cursor, Continue, LangChain
@@ -59,7 +60,27 @@ cd ai-workstation
 ./mb ai gpu check               # check NVIDIA GPU availability
 ./mb ai update                  # pull latest images and recreate
 ./mb ai rag setup               # set up RAG (Chroma + Open WebUI)
+./mb ai ollama-prod deploy --cpu   # deploy hardened Ollama (CPU)
+./mb ai ollama-prod deploy --gpu   # deploy hardened Ollama (GPU)
+./mb ai ollama-prod deploy --webui # deploy hardened Open WebUI
+./mb ai ollama-prod preload        # preload default models (idempotent)
+./mb ai ollama-prod preload --model llama3.2:3b --dry-run
+./mb ai ollama-prod health         # API + models + VRAM + disk check
 ./mb ai help                    # full help
+```
+
+### Production deployment
+
+The `ollama-prod` command uses hardened compose files with pinned image tags,
+loopback-only port binding, healthchecks, and log rotation. See
+[`docs/production-config.md`](docs/production-config.md) for the full tuning,
+backup, and security guide.
+
+```bash
+./mb ai ollama-prod deploy --gpu      # Ollama (pinned tag, 127.0.0.1 bind)
+./mb ai ollama-prod deploy --webui    # Open WebUI (pinned tag, 127.0.0.1 bind)
+./mb ai ollama-prod preload           # pulls llama3.2:3b, qwen2.5:7b, nomic-embed-text
+./mb ai ollama-prod health            # verify the stack
 ```
 
 ## Model Recommendations
@@ -112,6 +133,7 @@ retrieval-augmented generation. See [`docs/rag-setup.md`](docs/rag-setup.md).
 ## Documentation
 
 - [Deployment Guide](docs/deployment-guide.md) — CPU & GPU setup, prerequisites, troubleshooting
+- [Production Config](docs/production-config.md) — hardening, tuning, backup, security for production
 - [Model Selection](docs/model-selection.md) — choosing models, quantization explained
 - [Remote Access](docs/remote-access.md) — Caddy reverse proxy, HTTPS, basic auth
 - [API Usage](docs/api-usage.md) — OpenAI-compatible API, curl & SDK examples
