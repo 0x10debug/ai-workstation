@@ -1,0 +1,67 @@
+# AI Workstation - Open WebUI production deployment
+# Pinned-tag Open WebUI front-end for the Ollama production service.
+# Part of the 0x10debug VPS tool suite
+#
+# Hardening summary:
+#   - Pinned image tag (ghcr.io/open-webui/open-webui:v0.4.8) — no floating `main`
+#   - Web port bound to 127.0.0.1 only — expose via reverse proxy with auth
+#   - Healthcheck via /health
+#   - restart: unless-stopped
+#   - Log rotation
+#   - Signup can be disabled after initial admin provisioning
+#
+# Usage:
+#   docker compose -f compose/open-webui.yml --env-file compose/.env up -d
+#
+# This file depends on the `ollama` service being present on the `mb-proxy`
+# network (provided by compose/ollama-production.yml or the legacy
+# compose/compose.{cpu,gpu}.yml files). Start Ollama first.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+
+volumes:
+  open-webui-data:
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.4.8
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — terminate TLS at the reverse proxy.
+      - "127.0.0.1:${OPEN_WEBUI_PORT:-3000}:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      # Connect to Ollama over the shared mb-proxy Docker network.
+      OLLAMA_BASE_URL: http://ollama:11434
+      # Authentication: require login. Disable only behind an authenticated
+      # reverse proxy with a single trusted user.
+      WEBUI_AUTH: ${WEBUI_AUTH:-true}
+      # Display name shown in the UI header / browser tab.
+      WEBUI_NAME: ${WEBUI_NAME:-AI Workstation}
+      # Allow new sign-ups. Set to false after provisioning the admin account
+      # to lock the instance down to existing users.
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
+    # NOTE: this file does not declare a depends_on for `ollama` because the
+    # Ollama service lives in compose/ollama-production.yml. Start Ollama first:
+    #   docker compose -f compose/ollama-production.yml ... up -d
+    # When both files are passed together (`-f ollama-production.yml -f
+    # open-webui.yml`) you may add a depends_on block; omitted here so this
+    # file stays independently valid under `docker compose config`.
+    networks:
+      - mb-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

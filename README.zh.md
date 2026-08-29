@@ -7,6 +7,7 @@
 ## 特性
 
 - **一条命令部署** —— `./mb ai deploy` 启动 Ollama + Open WebUI
+- **生产级加固** —— 固定镜像 tag、端口仅绑定 127.0.0.1、健康检查、日志轮转、GPU profile
 - **CPU 与 GPU** —— 自动检测 NVIDIA GPU；同一镜像，自动加速
 - **自托管 ChatGPT** —— Open WebUI 提供精致的聊天界面
 - **OpenAI 兼容 API** —— 可直接作为 Cursor、Continue、LangChain 的 base URL
@@ -59,7 +60,26 @@ cd ai-workstation
 ./mb ai gpu check               # 检测 NVIDIA GPU
 ./mb ai update                  # 拉取最新镜像并重建
 ./mb ai rag setup               # 部署 RAG（Chroma + Open WebUI）
+./mb ai ollama-prod deploy --cpu   # 部署加固版 Ollama（CPU）
+./mb ai ollama-prod deploy --gpu   # 部署加固版 Ollama（GPU）
+./mb ai ollama-prod deploy --webui # 部署加固版 Open WebUI
+./mb ai ollama-prod preload        # 预加载默认模型（幂等）
+./mb ai ollama-prod preload --model llama3.2:3b --dry-run
+./mb ai ollama-prod health         # API + 模型 + 显存 + 磁盘健康检查
 ./mb ai help                    # 完整帮助
+```
+
+### 生产级部署
+
+`ollama-prod` 命令使用加固 compose 文件：固定镜像 tag、端口仅绑定 127.0.0.1、
+健康检查、日志轮转。完整调优、备份与安全指南见
+[`docs/production-config.md`](docs/production-config.md)。
+
+```bash
+./mb ai ollama-prod deploy --gpu      # Ollama（固定 tag，仅监听 127.0.0.1）
+./mb ai ollama-prod deploy --webui    # Open WebUI（固定 tag，仅监听 127.0.0.1）
+./mb ai ollama-prod preload           # 拉取 llama3.2:3b、qwen2.5:7b、nomic-embed-text
+./mb ai ollama-prod health            # 验证整套服务
 ```
 
 ## 模型推荐
@@ -111,6 +131,7 @@ Let's Encrypt 证书。详见 [`docs/remote-access.md`](docs/remote-access.md)�
 ## 文档
 
 - [部署指南](docs/deployment-guide.md) —— CPU 与 GPU 安装、前置条件、故障排查
+- [生产级配置](docs/production-config.md) —— 加固、调优、备份、生产安全
 - [模型选型](docs/model-selection.md) —— 如何选模型、量化原理说明
 - [远程访问](docs/remote-access.md) —— Caddy 反向代理、HTTPS、basic auth
 - [API 用法](docs/api-usage.md) —— OpenAI 兼容 API、curl 与 SDK 示例

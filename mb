@@ -15,6 +15,8 @@ source "${MB_AI_DIR}/lib/common.sh"
 source "${MB_AI_DIR}/lib/gpu.sh"
 # shellcheck source=lib/model.sh
 source "${MB_AI_DIR}/lib/model.sh"
+# shellcheck source=lib/ollama-healthcheck.sh
+source "${MB_AI_DIR}/lib/ollama-healthcheck.sh"
 
 # =====================================================================
 # Commands
@@ -271,6 +273,95 @@ mb_ai_rag() {
     esac
 }
 
+# =====================================================================
+# ollama-prod — production-grade Ollama + Open WebUI deployment
+# =====================================================================
+
+mb_ai_ollama_prod_compose() {
+    echo "${MB_COMPOSE_DIR}/ollama-production.yml"
+}
+
+mb_ai_ollama_prod_webui_compose() {
+    echo "${MB_COMPOSE_DIR}/open-webui.yml"
+}
+
+mb_ai_ollama_prod_deploy() {
+    local target=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu)   target="gpu"; shift ;;
+            --cpu)   target="cpu"; shift ;;
+            --webui) target="webui"; shift ;;
+            *) mb_die "Unknown option: $1 (use --gpu, --cpu, or --webui)" ;;
+        esac
+    done
+
+    mb_check_docker
+    local env_file
+    env_file=$(mb_env_file)
+    [[ -f "${env_file}" ]] || mb_die "Missing ${env_file}. Run 'mb ai deploy' first or copy compose/.env.example."
+
+    # Ensure mb-proxy network exists
+    if ! docker network ls --format '{{.Name}}' | grep -qx "${MB_PROXY_NETWORK:-mb-proxy}"; then
+        mb_warn "Docker network '${MB_PROXY_NETWORK:-mb-proxy}' not found; creating it."
+        docker network create "${MB_PROXY_NETWORK:-mb-proxy}" >/dev/null
+        mb_success "Created network '${MB_PROXY_NETWORK:-mb-proxy}'"
+    fi
+
+    if [[ "${target}" == "webui" ]]; then
+        local webui_compose
+        webui_compose=$(mb_ai_ollama_prod_webui_compose)
+        mb_step "Deploying Open WebUI (production)"
+        mb_info "Requires Ollama to be running on the mb-proxy network."
+        docker compose -f "${webui_compose}" --env-file "${env_file}" pull
+        docker compose -f "${webui_compose}" --env-file "${env_file}" up -d
+        mb_success "Open WebUI deployed (production)"
+        mb_detail "Web UI: http://localhost:${OPEN_WEBUI_PORT:-3000}"
+        mb_detail "Remember to set ENABLE_SIGNUP=false after creating the admin account."
+        return 0
+    fi
+
+    # Ollama deploy (cpu or gpu)
+    [[ -z "${target}" ]] && mb_die "Specify --gpu, --cpu, or --webui"
+    local compose_file
+    compose_file=$(mb_ai_ollama_prod_compose)
+    # CPU and GPU are mutually exclusive compose profiles so they never
+    # collide on the shared `ollama` container name.
+    local profile_args=(--profile "${target}")
+
+    if [[ "${target}" == "gpu" ]] && ! mb_gpu_check; then
+        mb_warn "No NVIDIA GPU detected; deploying GPU profile anyway."
+        mb_detail "The container will fail to start without the NVIDIA Container Toolkit."
+    fi
+
+    mb_step "Deploying Ollama (production, ${target})"
+    docker compose -f "${compose_file}" "${profile_args[@]}" --env-file "${env_file}" pull
+    docker compose -f "${compose_file}" "${profile_args[@]}" --env-file "${env_file}" up -d
+    mb_success "Ollama deployed (production, ${target})"
+    mb_detail "API: http://127.0.0.1:${OLLAMA_PORT:-11434} (loopback only)"
+    mb_detail "Preload models:  mb ai ollama-prod preload"
+    mb_detail "Health check:    mb ai ollama-prod health"
+}
+
+mb_ai_ollama_prod_preload() {
+    bash "${MB_AI_DIR}/scripts/preload-models.sh" "$@"
+}
+
+mb_ai_ollama_prod_health() {
+    ollama_check_all
+}
+
+mb_ai_ollama_prod() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        deploy)  mb_ai_ollama_prod_deploy "$@" ;;
+        preload) mb_ai_ollama_prod_preload "$@" ;;
+        health)  mb_ai_ollama_prod_health "$@" ;;
+        *)       mb_die "Usage: mb ai ollama-prod <deploy|preload|health> [args]" ;;
+    esac
+}
+
 mb_ai_help() {
     cat <<'HELP'
 mb ai - Self-hosted AI Workstation (Ollama + Open WebUI)
@@ -292,6 +383,11 @@ COMMANDS
   gpu check           Check NVIDIA GPU availability
   update              Update AI components (pull + recreate)
   rag setup           Set up RAG (Chroma + Open WebUI integration)
+  ollama-prod deploy [--cpu|--gpu|--webui]
+                       Deploy the hardened production stack
+  ollama-prod preload [--model <tag>] [--config <file>] [--dry-run]
+                       Preload models into a running Ollama
+  ollama-prod health    Full health check (API, models, VRAM, disk)
   help                Show this help
 
 EXAMPLES
@@ -300,6 +396,9 @@ EXAMPLES
   mb ai model recommend
   mb ai api enable
   mb ai status
+  mb ai ollama-prod deploy --gpu
+  mb ai ollama-prod preload --dry-run
+  mb ai ollama-prod health
 
 Part of the 0x10debug VPS tool suite.
 HELP
@@ -326,6 +425,7 @@ main() {
         gpu)       mb_ai_gpu "$@" ;;
         update)    mb_ai_update "$@" ;;
         rag)       mb_ai_rag "$@" ;;
+        ollama-prod) mb_ai_ollama_prod "$@" ;;
         help|-h|--help) mb_ai_help ;;
         *)         mb_error "Unknown command: ${cmd}"; echo; mb_ai_help; exit 1 ;;
     esac
