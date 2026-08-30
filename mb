@@ -267,11 +267,17 @@ mb_ai_update() {
 
 mb_ai_rag() {
     local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
     case "${sub}" in
         setup)
-            bash "${MB_RAG_DIR}/rag-setup.sh" "$@"
+            bash "${MB_RAG_DIR}/rag-manage.sh" setup "$@"
             ;;
-        *) mb_die "Usage: mb ai rag setup" ;;
+        ingest|collections|query|backup|restore|status|models)
+            bash "${MB_RAG_DIR}/rag-manage.sh" "${sub}" "$@"
+            ;;
+        *)
+            mb_die "Usage: mb ai rag <setup|ingest|collections|query|backup|restore|status|models>"
+            ;;
     esac
 }
 
@@ -650,6 +656,16 @@ COMMANDS
   gpu check           Check NVIDIA GPU availability
   update              Update AI components (pull + recreate)
   rag setup           Set up RAG (Chroma + Open WebUI integration)
+  rag ingest <path>   Ingest documents from a directory into Chroma
+  rag collections list    List all Chroma collections
+  rag collections info <n>   Show details of a collection
+  rag collections delete <n> Delete a collection (with confirmation)
+  rag query <coll> <text>   Query a collection for similar documents
+  rag backup <out>    Backup Chroma database to a tar.gz file
+  rag restore <in>    Restore Chroma database from a tar.gz file
+  rag status          Show RAG system status
+  rag models list     Show supported embedding models
+  rag models pull <m> Pull a specific embedding model
   ollama-prod deploy [--cpu|--gpu|--webui]
                        Deploy the hardened production stack
   ollama-prod preload [--model <tag>] [--config <file>] [--dry-run]
@@ -684,6 +700,11 @@ EXAMPLES
   mb ai cluster deploy --gpu --size 3
   mb ai cluster status
   mb ai cluster sync-models
+  mb ai rag setup
+  mb ai rag ingest ./my-documents
+  mb ai rag collections list
+  mb ai rag query knowledge_base "what is RAG?"
+  mb ai rag backup ./chroma-backup.tar.gz
 
 Part of the 0x10debug VPS tool suite.
 HELP

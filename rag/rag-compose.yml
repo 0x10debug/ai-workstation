@@ -2,8 +2,17 @@
 # Adds Chroma vector database and configures Open WebUI RAG settings.
 # Part of the 0x10debug VPS tool suite
 #
+# Hardening:
+#   - Pinned image tags (no floating `latest`)
+#   - Chroma port bound to 127.0.0.1 only
+#   - Healthcheck on Chroma
+#   - Log rotation
+#   - Persistent volume for vector data
+#
 # Usage (via mb CLI):
 #   mb ai rag setup
+#   mb ai rag ingest /path/to/documents
+#   mb ai rag collections list
 #
 # Manual usage:
 #   docker compose -f rag/rag-compose.yml --env-file compose/.env up -d
@@ -13,38 +22,35 @@ networks:
     external: true
     name: ${MB_PROXY_NETWORK:-mb-proxy}
 
+volumes:
+  chroma-data:
+
 services:
   chroma:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:1.0.10
     container_name: chroma
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Bind to loopback only — not exposed to public internet
+      - "127.0.0.1:${CHROMA_PORT:-8000}:8000"
     volumes:
-      - /data/chroma:/chroma/chroma
+      - chroma-data:/chroma/chroma
     environment:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
+      - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_AUTH_TOKEN:-}
+      - CHROMA_SERVER_AUTHN_PROVIDER=${CHROMA_AUTH_PROVIDER:-}
+      - CHROMA_SERVER_AUTHN_METHOD=${CHROMA_AUTH_METHOD:-}
     networks:
       - mb-proxy
-
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    restart: unless-stopped
-    ports:
-      - "${OPEN_WEBUI_PORT:-3000}:8080"
-    volumes:
-      - /data/open-webui:/app/backend/data
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      # ---- RAG settings ----
-      - RAG_EMBEDDING_ENGINE=ollama
-      - RAG_EMBEDDING_MODEL=nomic-embed-text
-      - CHROMA_DB_URL=http://chroma:8000
-      - RAG_DOCUMENT_MAX_CHARS=10000
-      - RAG_TOP_K=4
-    depends_on:
-      - chroma
-    networks:
-      - mb-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
