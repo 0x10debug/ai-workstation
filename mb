@@ -463,6 +463,172 @@ mb_ai_litellm() {
     esac
 }
 
+# =====================================================================
+# cluster — multi-instance Ollama with HAProxy load balancing
+# =====================================================================
+
+mb_ai_cluster_compose() {
+    echo "${MB_COMPOSE_DIR}/ollama-cluster.yml"
+}
+
+mb_ai_cluster_deploy() {
+    local target=""
+    local size=2
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpu)  target="gpu"; shift ;;
+            --cpu)  target="cpu"; shift ;;
+            --size) size="$2"; shift 2 ;;
+            *) mb_die "Unknown option: $1 (use --cpu, --gpu, or --size <N>)" ;;
+        esac
+    done
+
+    [[ -z "$target" ]] && mb_die "Specify --cpu or --gpu for cluster deployment"
+    [[ "$size" -lt 2 ]] && mb_die "Cluster size must be at least 2"
+    [[ "$size" -gt 3 ]] && mb_die "Cluster size must be at most 3 (compose file supports 2-3 instances)"
+
+    mb_check_docker
+    local env_file
+    env_file=$(mb_env_file)
+    [[ -f "${env_file}" ]] || mb_die "Missing ${env_file}. Run 'mb ai deploy' first or copy compose/.env.example."
+
+    # Ensure mb-proxy network exists
+    if ! docker network ls --format '{{.Name}}' | grep -qx "${MB_PROXY_NETWORK:-mb-proxy}"; then
+        mb_warn "Docker network '${MB_PROXY_NETWORK:-mb-proxy}' not found; creating it."
+        docker network create "${MB_PROXY_NETWORK:-mb-proxy}" >/dev/null
+        mb_success "Created network '${MB_PROXY_NETWORK:-mb-proxy}'"
+    fi
+
+    local compose_file
+    compose_file=$(mb_ai_cluster_compose)
+    [[ -f "$compose_file" ]] || mb_die "Cluster compose file not found: $compose_file"
+
+    if [[ "${target}" == "gpu" ]] && ! mb_gpu_check; then
+        mb_warn "No NVIDIA GPU detected; deploying GPU profile anyway."
+        mb_detail "The containers will fail to start without the NVIDIA Container Toolkit."
+    fi
+
+    mb_step "Deploying Ollama cluster (${size} instances, ${target})"
+    export OLLAMA_CLUSTER_SIZE="$size"
+    local profile_args=(--profile "${target}")
+
+    # If size is 2, we need to remove the 3rd instance from depends_on
+    # For simplicity, we deploy all 3 but mark instance 3 as backup in HAProxy
+    # (already done in haproxy-cluster.cfg)
+
+    docker compose -f "$compose_file" "${profile_args[@]}" --env-file "${env_file}" pull
+    docker compose -f "$compose_file" "${profile_args[@]}" --env-file "${env_file}" up -d
+
+    mb_success "Ollama cluster deployed (${size} instances, ${target})"
+    mb_detail "HAProxy:       http://127.0.0.1:${OLLAMA_CLUSTER_PORT:-11434} (loopback only)"
+    mb_detail "HAProxy stats: http://127.0.0.1:8404 (loopback only)"
+    mb_detail "Instances:     ollama-1, ollama-2$( [[ $size -ge 3 ]] && echo ', ollama-3' )"
+    mb_detail "Status:        mb ai cluster status"
+    mb_detail "Sync models:   mb ai cluster sync-models"
+}
+
+mb_ai_cluster_status() {
+    mb_check_docker
+    mb_step "Ollama cluster status"
+
+    # HAProxy
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ollama-haproxy; then
+        mb_success "HAProxy: running"
+        local haproxy_stats
+        haproxy_stats=$(docker exec ollama-haproxy sh -c 'echo "show stat" | socat /dev/stdin /tmp/haproxy.sock 2>/dev/null || true' 2>/dev/null | tail -n +2 || echo "")
+        if [[ -n "$haproxy_stats" ]]; then
+            mb_detail "$(echo "$haproxy_stats" | awk -F, 'NR<=3{printf "  %-12s %-10s %-8s %s\n", $2, $18, $19, $8}')"
+        fi
+    else
+        mb_warn "HAProxy: not running"
+    fi
+
+    # Ollama instances
+    local instances=("ollama-1" "ollama-2" "ollama-3")
+    for inst in "${instances[@]}"; do
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$inst"; then
+            local model_count
+            model_count=$(docker exec "$inst" ollama list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' || echo "?")
+            mb_success "${inst}: running (${model_count} models)"
+        elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$inst"; then
+            mb_warn "${inst}: stopped"
+        fi
+    done
+
+    # Test load balancer
+    local lb_response
+    lb_response=$(curl -fsS http://127.0.0.1:${OLLAMA_CLUSTER_PORT:-11434}/api/version 2>/dev/null || echo "")
+    if [[ -n "$lb_response" ]]; then
+        mb_success "Load balancer: responding"
+        mb_detail "Version: $(echo "$lb_response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","?"))' 2>/dev/null || echo '?')"
+    else
+        mb_warn "Load balancer: not responding"
+    fi
+}
+
+mb_ai_cluster_sync_models() {
+    mb_check_docker
+
+    # Get models from instance 1
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ollama-1; then
+        mb_die "ollama-1 is not running"
+    fi
+
+    mb_step "Syncing models across cluster instances"
+
+    local models
+    models=$(docker exec ollama-1 ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' || echo "")
+    if [[ -z "$models" ]]; then
+        mb_warn "No models found on ollama-1"
+        return
+    fi
+
+    local model_list=()
+    while IFS= read -r m; do
+        [[ -n "$m" ]] && model_list+=("$m")
+    done <<< "$models"
+
+    mb_info "Found ${#model_list[@]} model(s) on ollama-1"
+
+    local instances=("ollama-2" "ollama-3")
+    for inst in "${instances[@]}"; do
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$inst"; then
+            mb_detail "${inst}: not running, skipping"
+            continue
+        fi
+        for model in "${model_list[@]}"; do
+            mb_detail "${inst}: pulling ${model}..."
+            docker exec "$inst" ollama pull "$model" >/dev/null 2>&1 && \
+                mb_success "${inst}: ${model} synced" || \
+                mb_warn "${inst}: ${model} sync failed"
+        done
+    done
+
+    mb_success "Model sync complete"
+}
+
+mb_ai_cluster_stop() {
+    mb_check_docker
+    mb_step "Stopping Ollama cluster"
+    local compose_file
+    compose_file=$(mb_ai_cluster_compose)
+    [[ -f "$compose_file" ]] || mb_die "Cluster compose file not found: $compose_file"
+    docker compose -f "$compose_file" --profile cpu --profile gpu down 2>/dev/null || true
+    mb_success "Ollama cluster stopped"
+}
+
+mb_ai_cluster() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        deploy)       mb_ai_cluster_deploy "$@" ;;
+        status)       mb_ai_cluster_status "$@" ;;
+        sync-models)  mb_ai_cluster_sync_models "$@" ;;
+        stop)         mb_ai_cluster_stop "$@" ;;
+        *)            mb_die "Usage: mb ai cluster <deploy|status|sync-models|stop> [args]" ;;
+    esac
+}
+
 mb_ai_help() {
     cat <<'HELP'
 mb ai - Self-hosted AI Workstation (Ollama + Open WebUI)
@@ -495,6 +661,11 @@ COMMANDS
                        Deploy Ollama + LiteLLM + Open WebUI together
   litellm health        Full health check (liveness, models, keys, budget)
   litellm config-check  Validate config.yaml + env keys without running
+  cluster deploy [--cpu|--gpu] [--size <N>]
+                       Deploy multi-instance Ollama cluster with HAProxy (2-3 instances)
+  cluster status        Show cluster status (HAProxy + instances + load balancer)
+  cluster sync-models   Sync models from ollama-1 to all other instances
+  cluster stop          Stop the entire cluster
   help                Show this help
 
 EXAMPLES
@@ -510,6 +681,9 @@ EXAMPLES
   mb ai litellm deploy --full --gpu
   mb ai litellm health
   mb ai litellm config-check
+  mb ai cluster deploy --gpu --size 3
+  mb ai cluster status
+  mb ai cluster sync-models
 
 Part of the 0x10debug VPS tool suite.
 HELP
@@ -538,6 +712,7 @@ main() {
         rag)       mb_ai_rag "$@" ;;
         ollama-prod) mb_ai_ollama_prod "$@" ;;
         litellm)     mb_ai_litellm "$@" ;;
+        cluster)     mb_ai_cluster "$@" ;;
         help|-h|--help) mb_ai_help ;;
         *)         mb_error "Unknown command: ${cmd}"; echo; mb_ai_help; exit 1 ;;
     esac

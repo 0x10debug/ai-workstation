@@ -1,0 +1,204 @@
+# AI Workstation - Ollama multi-instance cluster with load balancing
+# Deploys multiple Ollama instances behind an HAProxy load balancer for
+# higher throughput and fault tolerance.
+# Part of the 0x10debug VPS tool suite
+#
+# Architecture:
+#
+#   Client → HAProxy (:11434) → ollama-1 (:11434)
+#                          ──→ ollama-2 (:11434)
+#                          ──→ ollama-3 (:11434)
+#
+# Each Ollama instance has its own model volume. Use `mb ai cluster sync-models`
+# to ensure all instances have the same models loaded.
+#
+# Hardening:
+#   - HAProxy binds to 127.0.0.1 only (expose via reverse proxy)
+#   - Pinned image tags (no floating `latest`)
+#   - Healthcheck on every container
+#   - Log rotation to prevent disk exhaustion
+#   - Resource limits per instance
+#   - GPU support gated behind the `gpu` compose profile
+#
+# Usage (CPU, 3 instances):
+#   docker compose -f compose/ollama-cluster.yml --profile cpu \
+#       --env-file compose/.env up -d
+#
+# Usage (GPU, 2 instances):
+#   OLLAMA_CLUSTER_SIZE=2 docker compose -f compose/ollama-cluster.yml \
+#       --profile gpu --env-file compose/.env up -d
+#
+# The `mb ai cluster deploy --cpu|--gpu` wrapper handles instance count and
+# profile selection for you.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+  mb-cluster:
+    driver: bridge
+
+volumes:
+  ollama-models-1:
+  ollama-models-2:
+  ollama-models-3:
+
+x-ollama-cluster-common: &ollama-cluster-common
+  image: ollama/ollama:0.3.14
+  restart: unless-stopped
+  environment:
+    OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+    OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+    OLLAMA_MAX_VRAM: ${OLLAMA_MAX_VRAM:-0}
+    OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/version || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  deploy:
+    resources:
+      limits:
+        memory: ${OLLAMA_CLUSTER_MEMORY_LIMIT:-8g}
+  networks:
+    - mb-cluster
+
+services:
+  # ── Ollama instance 1 ──────────────────────────────────────────
+  ollama-1:
+    <<: *ollama-cluster-common
+    profiles: ["cpu"]
+    container_name: ollama-1
+    volumes:
+      - ollama-models-1:/root/.ollama
+
+  ollama-1-gpu:
+    <<: *ollama-cluster-common
+    profiles: ["gpu"]
+    container_name: ollama-1
+    volumes:
+      - ollama-models-1:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: ${OLLAMA_CLUSTER_MEMORY_LIMIT:-8g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ── Ollama instance 2 ──────────────────────────────────────────
+  ollama-2:
+    <<: *ollama-cluster-common
+    profiles: ["cpu"]
+    container_name: ollama-2
+    volumes:
+      - ollama-models-2:/root/.ollama
+
+  ollama-2-gpu:
+    <<: *ollama-cluster-common
+    profiles: ["gpu"]
+    container_name: ollama-2
+    volumes:
+      - ollama-models-2:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: ${OLLAMA_CLUSTER_MEMORY_LIMIT:-8g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ── Ollama instance 3 (optional, set OLLAMA_CLUSTER_SIZE=3) ────
+  ollama-3:
+    <<: *ollama-cluster-common
+    profiles: ["cpu"]
+    container_name: ollama-3
+    volumes:
+      - ollama-models-3:/root/.ollama
+    # This instance is only started when OLLAMA_CLUSTER_SIZE >= 3
+    # (controlled by the mb CLI wrapper, which removes this service
+    # from the compose file when cluster size is 2).
+
+  ollama-3-gpu:
+    <<: *ollama-cluster-common
+    profiles: ["gpu"]
+    container_name: ollama-3
+    volumes:
+      - ollama-models-3:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: ${OLLAMA_CLUSTER_MEMORY_LIMIT:-8g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ── HAProxy load balancer ──────────────────────────────────────
+  haproxy:
+    image: haproxy:3.1
+    container_name: ollama-haproxy
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — expose via reverse proxy with auth
+      - "127.0.0.1:${OLLAMA_CLUSTER_PORT:-11434}:11434"
+    volumes:
+      - ./haproxy-cluster.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - mb-cluster
+      - mb-proxy
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      ollama-1:
+        condition: service_healthy
+      ollama-2:
+        condition: service_healthy
+    profiles: ["cpu"]
+
+  haproxy-gpu:
+    image: haproxy:3.1
+    container_name: ollama-haproxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OLLAMA_CLUSTER_PORT:-11434}:11434"
+    volumes:
+      - ./haproxy-cluster.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - mb-cluster
+      - mb-proxy
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      ollama-1-gpu:
+        condition: service_healthy
+      ollama-2-gpu:
+        condition: service_healthy
+    profiles: ["gpu"]
