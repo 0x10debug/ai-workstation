@@ -1,0 +1,80 @@
+# AI Workstation - LiteLLM API gateway
+# Unified LLM proxy with an OpenAI-compatible interface in front of Ollama.
+# Part of the 0x10debug VPS tool suite
+#
+# Hardening summary:
+#   - Pinned image tag (ghcr.io/berriai/litellm:v1.52.0) — no floating `latest`
+#   - API port bound to 127.0.0.1 only — never exposed to the public internet
+#   - Healthcheck via /health/liveness
+#   - restart: unless-stopped
+#   - Log rotation to prevent disk exhaustion
+#   - Master key + salt key for virtual-key management and budget control
+#   - Routes to Ollama over the shared mb-proxy Docker network
+#
+# Usage:
+#   docker compose -f compose/litellm.yml --env-file compose/.env up -d
+#
+# This file depends on the `ollama` service being present on the `mb-proxy`
+# network (provided by compose/ollama-production.yml). Start Ollama first:
+#   docker compose -f compose/ollama-production.yml --profile cpu ... up -d
+#
+# The `mb ai litellm deploy` wrapper handles ordering and the env file for you.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+
+volumes:
+  litellm-config:
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.52.0
+    container_name: litellm
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — expose publicly only through a reverse proxy
+      # (Caddy/Traefik from network-toolkit) with authentication.
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
+    volumes:
+      # LiteLLM routing config (model_list, settings, virtual keys).
+      # The file on the host is compose/litellm-config.yaml.
+      - ./litellm-config.yaml:/app/config.yaml:ro
+      # Persistent volume for LiteLLM's own state (logs, cached keys) when no
+      # external database_url is configured. Swap for a bind mount if you
+      # prefer a fixed host path.
+      - litellm-config:/app/litellm-data
+    environment:
+      # Base URL of the Ollama service on the mb-proxy network. LiteLLM sends
+      # OpenAI-shaped requests here; Ollama answers with its OpenAI-compatible
+      # /v1 endpoints.
+      OLLAMA_API_BASE: http://ollama:11434
+      # Master key — can call any model and create virtual keys. Generate one
+      # with:  openssl rand -hex 32
+      # Never commit a real key; set it in compose/.env.
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-litellm-master-change-me}
+      # Salt used to hash virtual API keys before they are stored. Generate
+      # with:  openssl rand -hex 32
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-litellm-salt-change-me}
+      # Optional: Postgres URL for persistent key/budget/usage tracking.
+      # When unset, LiteLLM falls back to in-memory state (lost on restart).
+      # DATABASE_URL: postgresql://litellm:secret@db:5432/litellm
+      # Where LiteLLM reads its routing config.
+      CONFIG_FILE_PATH: /app/config.yaml
+      # Store hashed virtual keys and usage under the mounted volume when no
+      # external database is configured.
+      LITELLM_LOG: ${LITELLM_LOG:-INFO}
+    networks:
+      - mb-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4000/health/liveness || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -11,6 +11,7 @@
 - **CPU 与 GPU** —— 自动检测 NVIDIA GPU；同一镜像，自动加速
 - **自托管 ChatGPT** —— Open WebUI 提供精致的聊天界面
 - **OpenAI 兼容 API** —— 可直接作为 Cursor、Continue、LangChain 的 base URL
+- **LiteLLM 网关** —— 统一 API 代理，支持模型路由、虚拟密钥和预算控制
 - **反向代理就绪** —— Caddyfile 自带安全头 + 可选认证
 - **RAG 支持** —— Chroma 向量数据库 + 文档问答，一条命令搞定
 - **模型管理** —— 拉取、列出、删除模型，并按 VPS 配置给出推荐
@@ -66,6 +67,10 @@ cd ai-workstation
 ./mb ai ollama-prod preload        # 预加载默认模型（幂等）
 ./mb ai ollama-prod preload --model llama3.2:3b --dry-run
 ./mb ai ollama-prod health         # API + 模型 + 显存 + 磁盘健康检查
+./mb ai litellm deploy             # 部署 LiteLLM API 网关（需要先启动 Ollama）
+./mb ai litellm deploy --full --gpu  # 部署 Ollama + LiteLLM + Open WebUI
+./mb ai litellm health             # 存活 + 模型 + 密钥 + 预算检查
+./mb ai litellm config-check       # 验证配置 + 环境变量密钥
 ./mb ai help                    # 完整帮助
 ```
 
@@ -81,6 +86,29 @@ cd ai-workstation
 ./mb ai ollama-prod preload           # 拉取 llama3.2:3b、qwen2.5:7b、nomic-embed-text
 ./mb ai ollama-prod health            # 验证整套服务
 ```
+
+### LiteLLM API 网关
+
+LiteLLM 在 Ollama 前面加了一层统一的 OpenAI 兼容 API 网关。它提供模型
+路由、带独立预算的虚拟 API 密钥、多 Ollama 实例负载均衡，以及将本地
+模型与云端模型（OpenAI、Anthropic、Gemini）混合在同一个端点后面的能力。
+
+```bash
+./mb ai litellm deploy               # 部署 LiteLLM（需要先启动 Ollama）
+./mb ai litellm deploy --full --gpu  # 部署 Ollama + LiteLLM + Open WebUI
+./mb ai litellm health               # 存活 + 模型 + 密钥 + 预算检查
+./mb ai litellm config-check         # 验证配置 + 环境变量密钥
+```
+
+首次部署前生成密钥：
+
+```bash
+openssl rand -hex 32   # -> LITELLM_MASTER_KEY 写入 compose/.env
+openssl rand -hex 32   # -> LITELLM_SALT_KEY 写入 compose/.env
+```
+
+路由策略、虚拟密钥管理、外部供应商集成和安全最佳实践详见
+[`docs/litellm-config.md`](docs/litellm-config.md)。
 
 ## 模型推荐
 
@@ -128,10 +156,17 @@ Let's Encrypt 证书。详见 [`docs/remote-access.md`](docs/remote-access.md)�
 可以。`./mb ai rag setup` 会部署 Chroma 并配置 Open WebUI 的检索增强
 生成。详见 [`docs/rag-setup.md`](docs/rag-setup.md)。
 
+**LiteLLM 是做什么的？**
+LiteLLM 是一个 API 网关，位于 Ollama 前面，暴露严格的 OpenAI 兼容端点。
+它提供带独立预算的虚拟 API 密钥、模型路由（混合本地 + 云端模型）和
+多 Ollama 实例负载均衡。用 `./mb ai litellm deploy` 部署。详见
+[`docs/litellm-config.md`](docs/litellm-config.md)。
+
 ## 文档
 
 - [部署指南](docs/deployment-guide.md) —— CPU 与 GPU 安装、前置条件、故障排查
 - [生产级配置](docs/production-config.md) —— 加固、调优、备份、生产安全
+- [LiteLLM 配置](docs/litellm-config.md) —— API 网关、模型路由、虚拟密钥、预算控制
 - [模型选型](docs/model-selection.md) —— 如何选模型、量化原理说明
 - [远程访问](docs/remote-access.md) —— Caddy 反向代理、HTTPS、basic auth
 - [API 用法](docs/api-usage.md) —— OpenAI 兼容 API、curl 与 SDK 示例

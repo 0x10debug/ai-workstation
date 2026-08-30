@@ -17,6 +17,8 @@ source "${MB_AI_DIR}/lib/gpu.sh"
 source "${MB_AI_DIR}/lib/model.sh"
 # shellcheck source=lib/ollama-healthcheck.sh
 source "${MB_AI_DIR}/lib/ollama-healthcheck.sh"
+# shellcheck source=lib/litellm-healthcheck.sh
+source "${MB_AI_DIR}/lib/litellm-healthcheck.sh"
 
 # =====================================================================
 # Commands
@@ -362,6 +364,105 @@ mb_ai_ollama_prod() {
     esac
 }
 
+# =====================================================================
+# litellm — LiteLLM API gateway deployment & management
+# =====================================================================
+
+mb_ai_litellm_compose() {
+    echo "${MB_COMPOSE_DIR}/litellm.yml"
+}
+
+mb_ai_litellm_proxy_compose() {
+    echo "${MB_COMPOSE_DIR}/litellm-proxy.yml"
+}
+
+mb_ai_litellm_deploy() {
+    local full=0
+    local target=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full)  full=1; shift ;;
+            --gpu)   target="gpu"; shift ;;
+            --cpu)   target="cpu"; shift ;;
+            *) mb_die "Unknown option: $1 (use --full, --gpu, or --cpu)" ;;
+        esac
+    done
+
+    mb_check_docker
+    local env_file
+    env_file=$(mb_env_file)
+    [[ -f "${env_file}" ]] || mb_die "Missing ${env_file}. Run 'mb ai deploy' first or copy compose/.env.example."
+
+    # Ensure mb-proxy network exists
+    if ! docker network ls --format '{{.Name}}' | grep -qx "${MB_PROXY_NETWORK:-mb-proxy}"; then
+        mb_warn "Docker network '${MB_PROXY_NETWORK:-mb-proxy}' not found; creating it."
+        docker network create "${MB_PROXY_NETWORK:-mb-proxy}" >/dev/null
+        mb_success "Created network '${MB_PROXY_NETWORK:-mb-proxy}'"
+    fi
+
+    if (( full == 1 )); then
+        # Joint deployment: Ollama + LiteLLM + Open WebUI
+        [[ -z "${target}" ]] && mb_die "Specify --cpu or --gpu for --full deployment"
+        local proxy_compose
+        proxy_compose=$(mb_ai_litellm_proxy_compose)
+        local profile_args=(--profile "${target}")
+
+        if [[ "${target}" == "gpu" ]] && ! mb_gpu_check; then
+            mb_warn "No NVIDIA GPU detected; deploying GPU profile anyway."
+            mb_detail "The container will fail to start without the NVIDIA Container Toolkit."
+        fi
+
+        mb_step "Deploying full stack (Ollama + LiteLLM + Open WebUI, ${target})"
+        mb_info "Open WebUI will route through LiteLLM (http://litellm:4000)"
+        docker compose -f "${proxy_compose}" "${profile_args[@]}" --env-file "${env_file}" pull
+        docker compose -f "${proxy_compose}" "${profile_args[@]}" --env-file "${env_file}" up -d
+        mb_success "Full stack deployed (Ollama + LiteLLM + Open WebUI, ${target})"
+        mb_detail "LiteLLM API:  http://127.0.0.1:${LITELLM_PORT:-4000} (loopback only)"
+        mb_detail "Open WebUI:   http://127.0.0.1:${OPEN_WEBUI_PORT:-3000}"
+        mb_detail "Ollama API:   http://127.0.0.1:${OLLAMA_PORT:-11434}"
+        mb_detail "Health check: mb ai litellm health"
+        return 0
+    fi
+
+    # LiteLLM-only deployment (assumes Ollama is already running)
+    local compose_file
+    compose_file=$(mb_ai_litellm_compose)
+
+    # Warn if Ollama is not running — LiteLLM will start but fail health checks
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ollama; then
+        mb_warn "Ollama container 'ollama' is not running."
+        mb_info "LiteLLM routes to http://ollama:11434 — start Ollama first:"
+        mb_detail "  mb ai ollama-prod deploy --cpu   (or --gpu)"
+    fi
+
+    mb_step "Deploying LiteLLM API gateway"
+    docker compose -f "${compose_file}" --env-file "${env_file}" pull
+    docker compose -f "${compose_file}" --env-file "${env_file}" up -d
+    mb_success "LiteLLM deployed"
+    mb_detail "API:          http://127.0.0.1:${LITELLM_PORT:-4000} (loopback only)"
+    mb_detail "Health check: mb ai litellm health"
+    mb_detail "Config check: mb ai litellm config-check"
+}
+
+mb_ai_litellm_health() {
+    litellm_check_all
+}
+
+mb_ai_litellm_config_check() {
+    litellm_check_config_file
+}
+
+mb_ai_litellm() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        deploy)       mb_ai_litellm_deploy "$@" ;;
+        health)       mb_ai_litellm_health "$@" ;;
+        config-check) mb_ai_litellm_config_check "$@" ;;
+        *)            mb_die "Usage: mb ai litellm <deploy|health|config-check> [args]" ;;
+    esac
+}
+
 mb_ai_help() {
     cat <<'HELP'
 mb ai - Self-hosted AI Workstation (Ollama + Open WebUI)
@@ -388,6 +489,12 @@ COMMANDS
   ollama-prod preload [--model <tag>] [--config <file>] [--dry-run]
                        Preload models into a running Ollama
   ollama-prod health    Full health check (API, models, VRAM, disk)
+  litellm deploy [--cpu|--gpu]
+                       Deploy the LiteLLM API gateway (needs running Ollama)
+  litellm deploy --full [--cpu|--gpu]
+                       Deploy Ollama + LiteLLM + Open WebUI together
+  litellm health        Full health check (liveness, models, keys, budget)
+  litellm config-check  Validate config.yaml + env keys without running
   help                Show this help
 
 EXAMPLES
@@ -399,6 +506,10 @@ EXAMPLES
   mb ai ollama-prod deploy --gpu
   mb ai ollama-prod preload --dry-run
   mb ai ollama-prod health
+  mb ai litellm deploy
+  mb ai litellm deploy --full --gpu
+  mb ai litellm health
+  mb ai litellm config-check
 
 Part of the 0x10debug VPS tool suite.
 HELP
@@ -426,6 +537,7 @@ main() {
         update)    mb_ai_update "$@" ;;
         rag)       mb_ai_rag "$@" ;;
         ollama-prod) mb_ai_ollama_prod "$@" ;;
+        litellm)     mb_ai_litellm "$@" ;;
         help|-h|--help) mb_ai_help ;;
         *)         mb_error "Unknown command: ${cmd}"; echo; mb_ai_help; exit 1 ;;
     esac

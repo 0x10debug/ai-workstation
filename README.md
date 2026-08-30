@@ -11,6 +11,7 @@ Part of the [0x10debug](https://github.com/0x10debug) VPS tool suite.
 - **CPU and GPU** — auto-detects NVIDIA GPUs; same image, auto-acceleration
 - **Self-hosted ChatGPT** — Open WebUI gives a polished chat interface
 - **OpenAI-compatible API** — drop-in base URL for Cursor, Continue, LangChain
+- **LiteLLM gateway** — unified API proxy with model routing, virtual keys, and budget control
 - **Reverse proxy ready** — Caddyfile with security headers + optional auth
 - **RAG support** — Chroma vector DB + document Q&A in one command
 - **Model management** — pull, list, remove, and get recommendations by VPS size
@@ -66,6 +67,10 @@ cd ai-workstation
 ./mb ai ollama-prod preload        # preload default models (idempotent)
 ./mb ai ollama-prod preload --model llama3.2:3b --dry-run
 ./mb ai ollama-prod health         # API + models + VRAM + disk check
+./mb ai litellm deploy             # deploy LiteLLM API gateway (needs Ollama)
+./mb ai litellm deploy --full --gpu  # deploy Ollama + LiteLLM + Open WebUI
+./mb ai litellm health             # liveness + models + keys + budget check
+./mb ai litellm config-check       # validate config + env keys
 ./mb ai help                    # full help
 ```
 
@@ -82,6 +87,31 @@ backup, and security guide.
 ./mb ai ollama-prod preload           # pulls llama3.2:3b, qwen2.5:7b, nomic-embed-text
 ./mb ai ollama-prod health            # verify the stack
 ```
+
+### LiteLLM API gateway
+
+LiteLLM adds a unified, OpenAI-compatible API gateway in front of Ollama.
+It gives you model routing, virtual API keys with per-key budgets, load
+balancing across multiple Ollama instances, and the ability to mix local
+and cloud models (OpenAI, Anthropic, Gemini) behind one endpoint.
+
+```bash
+./mb ai litellm deploy               # deploy LiteLLM (needs running Ollama)
+./mb ai litellm deploy --full --gpu  # deploy Ollama + LiteLLM + Open WebUI
+./mb ai litellm health               # liveness + models + keys + budget
+./mb ai litellm config-check         # validate config + env keys
+```
+
+Generate keys before first deploy:
+
+```bash
+openssl rand -hex 32   # -> LITELLM_MASTER_KEY in compose/.env
+openssl rand -hex 32   # -> LITELLM_SALT_KEY in compose/.env
+```
+
+See [`docs/litellm-config.md`](docs/litellm-config.md) for routing
+strategies, virtual key management, external provider integration, and
+security best practices.
 
 ## Model Recommendations
 
@@ -130,10 +160,18 @@ Encrypt certificates automatically. See
 Yes. `./mb ai rag setup` deploys Chroma and configures Open WebUI for
 retrieval-augmented generation. See [`docs/rag-setup.md`](docs/rag-setup.md).
 
+**What is LiteLLM for?**
+LiteLLM is an API gateway that sits in front of Ollama and exposes a
+strict OpenAI-compatible endpoint. It adds virtual API keys with per-key
+budgets, model routing (mix local + cloud models), and load balancing
+across multiple Ollama instances. Deploy it with `./mb ai litellm deploy`.
+See [`docs/litellm-config.md`](docs/litellm-config.md).
+
 ## Documentation
 
 - [Deployment Guide](docs/deployment-guide.md) — CPU & GPU setup, prerequisites, troubleshooting
 - [Production Config](docs/production-config.md) — hardening, tuning, backup, security for production
+- [LiteLLM Config](docs/litellm-config.md) — API gateway, model routing, virtual keys, budget control
 - [Model Selection](docs/model-selection.md) — choosing models, quantization explained
 - [Remote Access](docs/remote-access.md) — Caddy reverse proxy, HTTPS, basic auth
 - [API Usage](docs/api-usage.md) — OpenAI-compatible API, curl & SDK examples
