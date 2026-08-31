@@ -1,0 +1,101 @@
+# AI Workstation - SGLang high-throughput inference engine
+# OpenAI-compatible API server with RadixAttention and structured generation.
+# Part of the 0x10debug VPS tool suite
+#
+# Hardening summary:
+#   - Pinned image tag (lmsysorg/sglang:v0.5.18) — no floating `latest`
+#   - API port bound to 127.0.0.1 only — never exposed to the public internet
+#   - Healthcheck via /health
+#   - restart: unless-stopped
+#   - Log rotation to prevent disk exhaustion
+#   - Tunable model / context / tensor parallelism via env vars
+#   - GPU support via the nvidia device driver
+#   - Shared memory (shm_size) and IPC host mode for NCCL/tensor parallelism
+#
+# SGLang requires an NVIDIA GPU (CUDA). There is no CPU mode — use Ollama for
+# CPU-only hosts. See docs/vllm-alternative.md for when to choose SGLang.
+#
+# Usage:
+#   docker compose -f compose/sglang.yml --env-file compose/.env up -d
+#
+# The `mb ai platform sglang deploy` wrapper handles the env file and network
+# for you.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+
+volumes:
+  sglang-models:
+
+services:
+  sglang:
+    image: lmsysorg/sglang:v0.5.18
+    container_name: sglang
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — expose publicly only through a reverse proxy
+      # (Caddy/Traefik from network-toolkit) with authentication.
+      - "127.0.0.1:${SGLANG_PORT:-30000}:30000"
+    volumes:
+      # Hugging Face model cache. Models are downloaded here on first start
+      # and reused across restarts. Pre-download with `huggingface-cli
+      # download <model-id>` to avoid a slow first boot.
+      - sglang-models:/root/.cache/huggingface
+    environment:
+      # Hugging Face token — required to download gated models (Meta, Mistral).
+      # Generate one at https://huggingface.co/settings/tokens
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Model to serve (Hugging Face repo ID). Must be safetensors, not GGUF.
+      SGLANG_MODEL_PATH: ${SGLANG_MODEL_PATH:-meta-llama/Meta-Llama-3.1-8B-Instruct}
+      # Number of GPUs to shard the model across (tensor parallelism).
+      # All GPUs must be identical. Set to 1 for a single-GPU host.
+      SGLANG_TENSOR_PARALLEL_SIZE: ${SGLANG_TENSOR_PARALLEL_SIZE:-1}
+      # Maximum number of concurrent running requests.
+      SGLANG_MAX_RUNNING_REQUESTS: ${SGLANG_MAX_RUNNING_REQUESTS:-256}
+      # Maximum context length in tokens.
+      SGLANG_CONTEXT_LENGTH: ${SGLANG_CONTEXT_LENGTH:-8192}
+      # Quantization method: fp8, awq, or empty for none.
+      SGLANG_QUANTIZATION: ${SGLANG_QUANTIZATION:-}
+    # SGLang uses NCCL for tensor parallelism, which needs a large shared
+    # memory segment and host IPC. Required for multi-GPU; harmless for 1 GPU.
+    shm_size: ${SGLANG_SHM_SIZE:-32g}
+    ipc: host
+    # Shell-form command so the optional --quantization flag is only added
+    # when SGLANG_QUANTIZATION is non-empty (a YAML list item would otherwise
+    # inject an empty-string argument).
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        exec python3 -m sglang.launch_server \
+          --model-path "$${SGLANG_MODEL_PATH}" \
+          --host 0.0.0.0 --port 30000 \
+          --tp "$${SGLANG_TENSOR_PARALLEL_SIZE}" \
+          --max-running-requests "$${SGLANG_MAX_RUNNING_REQUESTS}" \
+          --context-length "$${SGLANG_CONTEXT_LENGTH}" \
+          $${SGLANG_QUANTIZATION:+--quantization "$${SGLANG_QUANTIZATION}"}
+    networks:
+      - mb-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:30000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: ${SGLANG_MEMORY_LIMIT:-32g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu

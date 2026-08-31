@@ -470,6 +470,253 @@ mb_ai_litellm() {
 }
 
 # =====================================================================
+# platform — Apple Silicon guide + vLLM/SGLang alternative engines
+# =====================================================================
+
+mb_ai_platform_vllm_compose() {
+    echo "${MB_COMPOSE_DIR}/vllm.yml"
+}
+
+mb_ai_platform_sglang_compose() {
+    echo "${MB_COMPOSE_DIR}/sglang.yml"
+}
+
+# Shared helper: ensure the mb-proxy network exists (mirrors other commands)
+_mb_ai_platform_ensure_network() {
+    if ! docker network ls --format '{{.Name}}' | grep -qx "${MB_PROXY_NETWORK:-mb-proxy}"; then
+        mb_warn "Docker network '${MB_PROXY_NETWORK:-mb-proxy}' not found; creating it."
+        docker network create "${MB_PROXY_NETWORK:-mb-proxy}" >/dev/null
+        mb_success "Created network '${MB_PROXY_NETWORK:-mb-proxy}'"
+    fi
+}
+
+mb_ai_platform_apple_silicon() {
+    local doc="${MB_DOCS_DIR}/apple-silicon.md"
+    if [[ ! -f "${doc}" ]]; then
+        mb_die "Apple Silicon guide not found: ${doc}"
+    fi
+    # Print the guide. Use cat so tables/code blocks render as written.
+    cat "${doc}"
+}
+
+mb_ai_platform_vllm_deploy() {
+    mb_check_docker
+    local env_file
+    env_file=$(mb_env_file)
+    [[ -f "${env_file}" ]] || mb_die "Missing ${env_file}. Run 'mb ai deploy' first or copy compose/.env.example."
+
+    if ! mb_gpu_check; then
+        mb_warn "No NVIDIA GPU detected; vLLM requires an NVIDIA GPU (CUDA)."
+        mb_detail "The container will fail to start without the NVIDIA Container Toolkit."
+        mb_detail "For CPU-only or Apple Silicon hosts, use Ollama:  mb ai deploy --cpu"
+    fi
+
+    _mb_ai_platform_ensure_network
+
+    local compose_file
+    compose_file=$(mb_ai_platform_vllm_compose)
+    [[ -f "${compose_file}" ]] || mb_die "vLLM compose file not found: ${compose_file}"
+
+    mb_step "Deploying vLLM inference engine"
+    mb_info "Model: ${VLLM_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
+    mb_info "Tensor parallel size: ${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+    docker compose -f "${compose_file}" --env-file "${env_file}" pull
+    docker compose -f "${compose_file}" --env-file "${env_file}" up -d
+
+    mb_success "vLLM deployed"
+    mb_detail "API:          http://127.0.0.1:${VLLM_PORT:-8000}/v1 (loopback only)"
+    mb_detail "Health check: mb ai platform vllm status"
+    mb_detail "Stop:         mb ai platform vllm stop"
+    mb_detail "Docs:         docs/vllm-alternative.md"
+}
+
+mb_ai_platform_vllm_status() {
+    mb_check_docker
+    mb_step "vLLM status"
+
+    local container="vllm"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${container}"; then
+        mb_success "${container}: running"
+        local model
+        model=$(docker inspect "${container}" \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | sed -n 's/^VLLM_MODEL=//p' | head -n1)
+        [[ -n "${model}" ]] && mb_detail "model: ${model}"
+        # Health endpoint
+        local health
+        health=$(curl -fsS "http://127.0.0.1:${VLLM_PORT:-8000}/health" 2>/dev/null || echo "")
+        if [[ -n "${health}" ]]; then
+            mb_success "Health: responding"
+        else
+            mb_warn "Health: not responding (still loading model?)"
+        fi
+        # GPU usage
+        if mb_gpu_check; then
+            mb_info "GPU usage (vLLM):"
+            docker exec "${container}" nvidia-smi \
+                --query-gpu=utilization.gpu,memory.used,memory.total \
+                --format=csv,noheader 2>/dev/null | sed 's/^/  /' \
+                || mb_detail "(nvidia-smi not available in container)"
+        fi
+    elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${container}"; then
+        mb_warn "${container}: stopped"
+    else
+        mb_warn "${container}: not deployed (run 'mb ai platform vllm deploy')"
+    fi
+}
+
+mb_ai_platform_vllm_stop() {
+    mb_check_docker
+    mb_step "Stopping vLLM"
+    local compose_file
+    compose_file=$(mb_ai_platform_vllm_compose)
+    [[ -f "${compose_file}" ]] || mb_die "vLLM compose file not found: ${compose_file}"
+    docker compose -f "${compose_file}" down 2>/dev/null || true
+    mb_success "vLLM stopped"
+}
+
+mb_ai_platform_sglang_deploy() {
+    mb_check_docker
+    local env_file
+    env_file=$(mb_env_file)
+    [[ -f "${env_file}" ]] || mb_die "Missing ${env_file}. Run 'mb ai deploy' first or copy compose/.env.example."
+
+    if ! mb_gpu_check; then
+        mb_warn "No NVIDIA GPU detected; SGLang requires an NVIDIA GPU (CUDA)."
+        mb_detail "The container will fail to start without the NVIDIA Container Toolkit."
+        mb_detail "For CPU-only or Apple Silicon hosts, use Ollama:  mb ai deploy --cpu"
+    fi
+
+    _mb_ai_platform_ensure_network
+
+    local compose_file
+    compose_file=$(mb_ai_platform_sglang_compose)
+    [[ -f "${compose_file}" ]] || mb_die "SGLang compose file not found: ${compose_file}"
+
+    mb_step "Deploying SGLang inference engine"
+    mb_info "Model: ${SGLANG_MODEL_PATH:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
+    mb_info "Tensor parallel size: ${SGLANG_TENSOR_PARALLEL_SIZE:-1}"
+    docker compose -f "${compose_file}" --env-file "${env_file}" pull
+    docker compose -f "${compose_file}" --env-file "${env_file}" up -d
+
+    mb_success "SGLang deployed"
+    mb_detail "API:          http://127.0.0.1:${SGLANG_PORT:-30000}/v1 (loopback only)"
+    mb_detail "Health check: mb ai platform sglang status"
+    mb_detail "Stop:         mb ai platform sglang stop"
+    mb_detail "Docs:         docs/vllm-alternative.md"
+}
+
+mb_ai_platform_sglang_status() {
+    mb_check_docker
+    mb_step "SGLang status"
+
+    local container="sglang"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${container}"; then
+        mb_success "${container}: running"
+        local model
+        model=$(docker inspect "${container}" \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | sed -n 's/^SGLANG_MODEL_PATH=//p' | head -n1)
+        [[ -n "${model}" ]] && mb_detail "model: ${model}"
+        # Health endpoint
+        local health
+        health=$(curl -fsS "http://127.0.0.1:${SGLANG_PORT:-30000}/health" 2>/dev/null || echo "")
+        if [[ -n "${health}" ]]; then
+            mb_success "Health: responding"
+        else
+            mb_warn "Health: not responding (still loading model?)"
+        fi
+        # GPU usage
+        if mb_gpu_check; then
+            mb_info "GPU usage (SGLang):"
+            docker exec "${container}" nvidia-smi \
+                --query-gpu=utilization.gpu,memory.used,memory.total \
+                --format=csv,noheader 2>/dev/null | sed 's/^/  /' \
+                || mb_detail "(nvidia-smi not available in container)"
+        fi
+    elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${container}"; then
+        mb_warn "${container}: stopped"
+    else
+        mb_warn "${container}: not deployed (run 'mb ai platform sglang deploy')"
+    fi
+}
+
+mb_ai_platform_sglang_stop() {
+    mb_check_docker
+    mb_step "Stopping SGLang"
+    local compose_file
+    compose_file=$(mb_ai_platform_sglang_compose)
+    [[ -f "${compose_file}" ]] || mb_die "SGLang compose file not found: ${compose_file}"
+    docker compose -f "${compose_file}" down 2>/dev/null || true
+    mb_success "SGLang stopped"
+}
+
+mb_ai_platform_compare() {
+    cat <<'COMPARE'
+AI Inference Engine Comparison
+==============================
+
+| Feature              | Ollama              | vLLM                | SGLang              |
+|----------------------|---------------------|---------------------|---------------------|
+| Ease of use          | Excellent           | Good                | Good                |
+| Continuous batching  | Limited             | Yes                 | Yes                 |
+| PagedAttention       | No                  | Yes                 | Yes (RadixAttention)|
+| Prefix caching       | No                  | Partial             | Yes (best-in-class) |
+| Structured output    | No                  | Partial             | Yes (native)        |
+| Tensor parallelism   | Basic (auto)        | Yes (tuned)         | Yes (tuned)         |
+| OpenAI-compatible API| Yes                 | Yes                 | Yes                 |
+| CPU support          | Yes                 | No                  | No                  |
+| Apple Silicon / Metal| Yes                 | No                  | No                  |
+| Model format         | GGUF                | HF safetensors/AWQ  | HF safetensors/AWQ  |
+| GPU support          | NVIDIA, AMD, Metal  | NVIDIA only         | NVIDIA only         |
+| Best for             | Dev, local, CPU     | Production throughput| Structured output  |
+| Compose template     | compose/*.yml       | compose/vllm.yml    | compose/sglang.yml  |
+| CLI command          | mb ai deploy        | mb ai platform vllm | mb ai platform sglang|
+
+Recommendations:
+  - Dev / local / CPU / Apple Silicon  -> Ollama   (mb ai deploy)
+  - Production high-throughput API     -> vLLM     (mb ai platform vllm deploy)
+  - Structured output / prefix-heavy   -> SGLang   (mb ai platform sglang deploy)
+
+See docs/vllm-alternative.md for the full guide and migration instructions.
+COMPARE
+}
+
+mb_ai_platform_vllm() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        deploy) mb_ai_platform_vllm_deploy "$@" ;;
+        status) mb_ai_platform_vllm_status "$@" ;;
+        stop)   mb_ai_platform_vllm_stop "$@" ;;
+        *)      mb_die "Usage: mb ai platform vllm <deploy|status|stop>" ;;
+    esac
+}
+
+mb_ai_platform_sglang() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        deploy) mb_ai_platform_sglang_deploy "$@" ;;
+        status) mb_ai_platform_sglang_status "$@" ;;
+        stop)   mb_ai_platform_sglang_stop "$@" ;;
+        *)      mb_die "Usage: mb ai platform sglang <deploy|status|stop>" ;;
+    esac
+}
+
+mb_ai_platform() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        apple-silicon) mb_ai_platform_apple_silicon "$@" ;;
+        vllm)          mb_ai_platform_vllm "$@" ;;
+        sglang)        mb_ai_platform_sglang "$@" ;;
+        compare)       mb_ai_platform_compare "$@" ;;
+        *)             mb_die "Usage: mb ai platform <apple-silicon|vllm|sglang|compare> [args]" ;;
+    esac
+}
+
+# =====================================================================
 # cluster — multi-instance Ollama with HAProxy load balancing
 # =====================================================================
 
@@ -838,6 +1085,17 @@ COMMANDS
                         Show recent Langfuse logs (last N lines per service, default 50)
   observability backup <output>
                         Backup the Langfuse Postgres database to a .sql.gz file
+  platform apple-silicon
+                        Show the Apple Silicon (M1/M2/M3/M4) deployment guide
+  platform vllm deploy  Deploy the vLLM high-throughput inference engine (NVIDIA GPU)
+  platform vllm status  Show vLLM status (container, health, GPU usage)
+  platform vllm stop    Stop vLLM
+  platform sglang deploy
+                        Deploy the SGLang inference engine (NVIDIA GPU)
+  platform sglang status
+                        Show SGLang status (container, health, GPU usage)
+  platform sglang stop  Stop SGLang
+  platform compare      Show the Ollama vs vLLM vs SGLang comparison table
   help                Show this help
 
 EXAMPLES
@@ -860,6 +1118,11 @@ EXAMPLES
   mb ai observability status
   mb ai observability logs 100
   mb ai observability backup ./langfuse-backup.sql.gz
+  mb ai platform apple-silicon
+  mb ai platform vllm deploy
+  mb ai platform vllm status
+  mb ai platform sglang deploy
+  mb ai platform compare
   mb ai rag setup
   mb ai rag ingest ./my-documents
   mb ai rag collections list
@@ -895,6 +1158,7 @@ main() {
         litellm)     mb_ai_litellm "$@" ;;
         cluster)     mb_ai_cluster "$@" ;;
         observability) mb_ai_observability "$@" ;;
+        platform)     mb_ai_platform "$@" ;;
         help|-h|--help) mb_ai_help ;;
         *)         mb_error "Unknown command: ${cmd}"; echo; mb_ai_help; exit 1 ;;
     esac

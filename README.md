@@ -176,6 +176,8 @@ See [`docs/litellm-config.md`](docs/litellm-config.md).
 - [Remote Access](docs/remote-access.md) — Caddy reverse proxy, HTTPS, basic auth
 - [API Usage](docs/api-usage.md) — OpenAI-compatible API, curl & SDK examples
 - [RAG Setup](docs/rag-setup.md) — document Q&A with Chroma
+- [Apple Silicon](docs/apple-silicon.md) — running the stack on M1/M2/M3/M4 Macs
+- [vLLM & SGLang](docs/vllm-alternative.md) — alternative high-throughput inference engines
 
 ## Related repositories
 

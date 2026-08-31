@@ -1,0 +1,102 @@
+# AI Workstation - vLLM high-throughput inference engine
+# OpenAI-compatible API server with PagedAttention and continuous batching.
+# Part of the 0x10debug VPS tool suite
+#
+# Hardening summary:
+#   - Pinned image tag (vllm/vllm-openai:0.6.0) — no floating `latest`
+#   - API port bound to 127.0.0.1 only — never exposed to the public internet
+#   - Healthcheck via /health
+#   - restart: unless-stopped
+#   - Log rotation to prevent disk exhaustion
+#   - Tunable model / GPU memory / context / tensor parallelism via env vars
+#   - GPU support via the nvidia device driver
+#
+# vLLM requires an NVIDIA GPU (CUDA). There is no CPU mode — use Ollama for
+# CPU-only hosts. See docs/vllm-alternative.md for when to choose vLLM.
+#
+# Usage:
+#   docker compose -f compose/vllm.yml --env-file compose/.env up -d
+#
+# The `mb ai platform vllm deploy` wrapper handles the env file and network
+# for you.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+
+volumes:
+  vllm-models:
+
+services:
+  vllm:
+    image: vllm/vllm-openai:0.6.0
+    container_name: vllm
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — expose publicly only through a reverse proxy
+      # (Caddy/Traefik from network-toolkit) with authentication.
+      - "127.0.0.1:${VLLM_PORT:-8000}:8000"
+    volumes:
+      # Hugging Face model cache. Models are downloaded here on first start
+      # and reused across restarts. Pre-download with `huggingface-cli
+      # download <model-id>` to avoid a slow first boot.
+      - vllm-models:/root/.cache/huggingface
+    environment:
+      # Hugging Face token — required to download gated models (Meta, Mistral).
+      # Generate one at https://huggingface.co/settings/tokens
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Model to serve (Hugging Face repo ID). Must be safetensors, not GGUF.
+      VLLM_MODEL: ${VLLM_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}
+      # Fraction of GPU VRAM to utilize (0.0–1.0). Raise toward 0.95 when the
+      # GPU is dedicated to vLLM; lower to 0.7–0.8 when sharing the GPU.
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
+      # Maximum context length in tokens. Higher values use more KV cache.
+      VLLM_MAX_MODEL_LEN: ${VLLM_MAX_MODEL_LEN:-8192}
+      # Number of GPUs to shard the model across (tensor parallelism).
+      # All GPUs must be identical. Set to 1 for a single-GPU host.
+      VLLM_TENSOR_PARALLEL_SIZE: ${VLLM_TENSOR_PARALLEL_SIZE:-1}
+      # Maximum number of concurrent sequences in a batch.
+      VLLM_MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS:-256}
+      # Quantization method: awq, gptq, fp8, or empty for none.
+      VLLM_QUANTIZATION: ${VLLM_QUANTIZATION:-}
+      # Name exposed in /v1/models. Defaults to VLLM_MODEL when empty.
+      VLLM_SERVED_MODEL_NAME: ${VLLM_SERVED_MODEL_NAME:-}
+    # Shell-form command so the optional --quantization flag is only added
+    # when VLLM_QUANTIZATION is non-empty (a YAML list item would otherwise
+    # inject an empty-string argument).
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        exec vllm serve "$${VLLM_MODEL}" \
+          --host 0.0.0.0 --port 8000 \
+          --gpu-memory-utilization "$${VLLM_GPU_MEMORY_UTILIZATION}" \
+          --max-model-len "$${VLLM_MAX_MODEL_LEN}" \
+          --tensor-parallel-size "$${VLLM_TENSOR_PARALLEL_SIZE}" \
+          --max-num-seqs "$${VLLM_MAX_NUM_SEQS}" \
+          --served-model-name "$${VLLM_SERVED_MODEL_NAME:-$$VLLM_MODEL}" \
+          $${VLLM_QUANTIZATION:+--quantization "$${VLLM_QUANTIZATION}"}
+    networks:
+      - mb-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: ${VLLM_MEMORY_LIMIT:-32g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
