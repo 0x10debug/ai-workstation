@@ -635,6 +635,155 @@ mb_ai_cluster() {
     esac
 }
 
+# =====================================================================
+# observability — Langfuse LLM observability stack
+# =====================================================================
+
+mb_ai_observability_compose() {
+    echo "${MB_COMPOSE_DIR}/langfuse.yml"
+}
+
+mb_ai_observability_deploy() {
+    mb_check_docker
+    local env_file
+    env_file=$(mb_env_file)
+    [[ -f "${env_file}" ]] || mb_die "Missing ${env_file}. Run 'mb ai deploy' first or copy compose/.env.example."
+
+    local compose_file
+    compose_file=$(mb_ai_observability_compose)
+    [[ -f "${compose_file}" ]] || mb_die "Langfuse compose file not found: ${compose_file}"
+
+    # Ensure mb-proxy network exists
+    if ! docker network ls --format '{{.Name}}' | grep -qx "${MB_PROXY_NETWORK:-mb-proxy}"; then
+        mb_warn "Docker network '${MB_PROXY_NETWORK:-mb-proxy}' not found; creating it."
+        docker network create "${MB_PROXY_NETWORK:-mb-proxy}" >/dev/null
+        mb_success "Created network '${MB_PROXY_NETWORK:-mb-proxy}'"
+    fi
+
+    # Warn about default secrets still in use
+    if grep -q 'nextauth-secret-change-me' "${env_file}" 2>/dev/null \
+        || grep -q 'salt-change-me' "${env_file}" 2>/dev/null \
+        || grep -q 'langfuse-change-me' "${env_file}" 2>/dev/null; then
+        mb_warn "Langfuse is using default secrets (nextauth/salt/db password)."
+        mb_detail "Generate strong values with:  openssl rand -hex 32"
+        mb_detail "Edit ${env_file} before exposing the UI publicly."
+    fi
+
+    mb_step "Deploying Langfuse observability stack"
+    mb_info "Langfuse UI + PostgreSQL + Redis"
+    docker compose -f "${compose_file}" --env-file "${env_file}" pull
+    docker compose -f "${compose_file}" --env-file "${env_file}" up -d
+    mb_success "Langfuse observability stack deployed"
+    mb_detail "UI:           http://127.0.0.1:${LANGFUSE_PORT:-3001} (loopback only)"
+    mb_detail "Postgres:     127.0.0.1:${LANGFUSE_DB_PORT:-5432} (loopback only)"
+    mb_detail "Redis:        127.0.0.1:${LANGFUSE_REDIS_PORT:-6379} (loopback only)"
+    mb_detail "Status:       mb ai observability status"
+    mb_detail "Docs:         docs/observability.md"
+}
+
+mb_ai_observability_status() {
+    mb_check_docker
+    mb_step "Langfuse observability status"
+
+    echo
+    mb_info "Containers:"
+    for c in langfuse langfuse-db langfuse-redis; do
+        local state
+        state=$(docker inspect -f '{{.State.Status}}' "${c}" 2>/dev/null || echo "absent")
+        if [[ "${state}" == "running" ]]; then
+            local health
+            health=$(docker inspect -f '{{.State.Health.Status}}' "${c}" 2>/dev/null || echo "unknown")
+            if [[ "${health}" == "healthy" ]]; then
+                printf '  %s%-18s%s running %s(healthy)%s\n' "${MB_C_GREEN}" "${c}" "${MB_C_RESET}" "${MB_C_GREEN}" "${MB_C_RESET}"
+            elif [[ "${health}" == "starting" ]]; then
+                printf '  %s%-18s%s running %s(starting)%s\n' "${MB_C_YELLOW}" "${c}" "${MB_C_RESET}" "${MB_C_YELLOW}" "${MB_C_RESET}"
+            else
+                printf '  %s%-18s%s running (%s)\n' "${MB_C_YELLOW}" "${c}" "${MB_C_RESET}" "${health}"
+            fi
+        else
+            printf '  %s%-18s%s %s\n' "${MB_C_RED}" "${c}" "${MB_C_RESET}" "${state}"
+        fi
+    done
+
+    echo
+    local ui_response
+    ui_response=$(curl -fsS http://127.0.0.1:${LANGFUSE_PORT:-3001}/api/public/health 2>/dev/null || echo "")
+    if [[ -n "${ui_response}" ]]; then
+        mb_success "Langfuse UI: responding"
+    else
+        mb_warn "Langfuse UI: not responding"
+    fi
+
+    echo
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx langfuse-db; then
+        local db_size
+        db_size=$(docker exec langfuse-db psql -U "${LANGFUSE_DB_USER:-langfuse}" -d "${LANGFUSE_DB_NAME:-langfuse}" \
+            -t -c "SELECT pg_size_pretty(pg_database_size('${LANGFUSE_DB_NAME:-langfuse}'));" 2>/dev/null | xargs || echo "?")
+        mb_info "Database size: ${db_size}"
+    fi
+}
+
+mb_ai_observability_stop() {
+    mb_check_docker
+    mb_step "Stopping Langfuse observability stack"
+    local compose_file
+    compose_file=$(mb_ai_observability_compose)
+    [[ -f "${compose_file}" ]] || mb_die "Langfuse compose file not found: ${compose_file}"
+    docker compose -f "${compose_file}" --env-file "$(mb_env_file)" down 2>/dev/null || \
+        docker compose -f "${compose_file}" down 2>/dev/null || true
+    mb_success "Langfuse observability stack stopped"
+    mb_detail "Data volumes (langfuse-postgres, langfuse-redis) are preserved."
+    mb_detail "Restart with:  mb ai observability deploy"
+}
+
+mb_ai_observability_logs() {
+    mb_check_docker
+    local lines="${1:-50}"
+    local compose_file
+    compose_file=$(mb_ai_observability_compose)
+    [[ -f "${compose_file}" ]] || mb_die "Langfuse compose file not found: ${compose_file}"
+    mb_step "Recent Langfuse logs (last ${lines} lines per service)"
+    for c in langfuse langfuse-db langfuse-redis; do
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${c}"; then
+            echo
+            mb_info "${c}:"
+            docker logs --tail "${lines}" "${c}" 2>&1 | sed 's/^/  /'
+        fi
+    done
+}
+
+mb_ai_observability_backup() {
+    mb_check_docker
+    local output="${1:-}"
+    [[ -n "${output}" ]] || mb_die "Usage: mb ai observability backup <output-file>"
+
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx langfuse-db; then
+        mb_die "langfuse-db container is not running. Start the stack first:  mb ai observability deploy"
+    fi
+
+    mb_step "Backing up Langfuse database"
+    mb_info "Output: ${output}"
+    docker exec langfuse-db pg_dump -U "${LANGFUSE_DB_USER:-langfuse}" -d "${LANGFUSE_DB_NAME:-langfuse}" \
+        | gzip > "${output}"
+    local size
+    size=$(du -h "${output}" | cut -f1)
+    mb_success "Backup complete: ${output} (${size})"
+    mb_detail "Restore:  gunzip -c ${output} | docker exec -i langfuse-db psql -U langfuse -d langfuse"
+}
+
+mb_ai_observability() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+    case "${sub}" in
+        deploy)  mb_ai_observability_deploy "$@" ;;
+        status)  mb_ai_observability_status "$@" ;;
+        stop)    mb_ai_observability_stop "$@" ;;
+        logs)    mb_ai_observability_logs "$@" ;;
+        backup)  mb_ai_observability_backup "$@" ;;
+        *)       mb_die "Usage: mb ai observability <deploy|status|stop|logs|backup> [args]" ;;
+    esac
+}
+
 mb_ai_help() {
     cat <<'HELP'
 mb ai - Self-hosted AI Workstation (Ollama + Open WebUI)
@@ -682,6 +831,13 @@ COMMANDS
   cluster status        Show cluster status (HAProxy + instances + load balancer)
   cluster sync-models   Sync models from ollama-1 to all other instances
   cluster stop          Stop the entire cluster
+  observability deploy  Deploy the Langfuse observability stack (UI + Postgres + Redis)
+  observability status  Show Langfuse stack status (containers, health, DB size)
+  observability stop    Stop the Langfuse stack (data volumes preserved)
+  observability logs [N]
+                        Show recent Langfuse logs (last N lines per service, default 50)
+  observability backup <output>
+                        Backup the Langfuse Postgres database to a .sql.gz file
   help                Show this help
 
 EXAMPLES
@@ -700,6 +856,10 @@ EXAMPLES
   mb ai cluster deploy --gpu --size 3
   mb ai cluster status
   mb ai cluster sync-models
+  mb ai observability deploy
+  mb ai observability status
+  mb ai observability logs 100
+  mb ai observability backup ./langfuse-backup.sql.gz
   mb ai rag setup
   mb ai rag ingest ./my-documents
   mb ai rag collections list
@@ -734,6 +894,7 @@ main() {
         ollama-prod) mb_ai_ollama_prod "$@" ;;
         litellm)     mb_ai_litellm "$@" ;;
         cluster)     mb_ai_cluster "$@" ;;
+        observability) mb_ai_observability "$@" ;;
         help|-h|--help) mb_ai_help ;;
         *)         mb_error "Unknown command: ${cmd}"; echo; mb_ai_help; exit 1 ;;
     esac

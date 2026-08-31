@@ -1,0 +1,139 @@
+# AI Workstation - Langfuse LLM observability stack
+# Self-hosted Langfuse for tracing, evaluating, and monitoring LLM calls.
+# Part of the 0x10debug VPS tool suite
+#
+# Hardening summary:
+#   - Pinned image tags (langfuse/langfuse:2.0.0, postgres:16-alpine,
+#     redis:7-alpine) — no floating `latest`
+#   - All ports bound to 127.0.0.1 only — never exposed to the public internet
+#   - Healthchecks for all three services
+#   - restart: unless-stopped
+#   - Log rotation to prevent disk exhaustion
+#   - Docker volumes for persistent Postgres data
+#   - Auth + encryption keys via environment variables (set in compose/.env)
+#   - Joins the shared mb-proxy network so Ollama/LiteLLM can reach it
+#
+# Usage:
+#   docker compose -f compose/langfuse.yml --env-file compose/.env up -d
+#
+# This stack is independent of Ollama/LiteLLM but joins the `mb-proxy` network
+# so that LiteLLM can send traces to Langfuse over the internal network at
+# http://langfuse:3000. Start Ollama/LiteLLM first if you want live tracing:
+#   mb ai ollama-prod deploy --cpu   (or --gpu)
+#   mb ai litellm deploy
+#
+# The `mb ai observability deploy` wrapper handles ordering and the env file.
+
+networks:
+  mb-proxy:
+    external: true
+    name: ${MB_PROXY_NETWORK:-mb-proxy}
+
+volumes:
+  langfuse-postgres:
+  langfuse-redis:
+
+services:
+  # ---- PostgreSQL — Langfuse metadata, traces, scores, users ----
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: langfuse-db
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — never expose the database publicly.
+      - "127.0.0.1:${LANGFUSE_DB_PORT:-5432}:5432"
+    volumes:
+      - langfuse-postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse-change-me}
+      POSTGRES_DB: ${LANGFUSE_DB_NAME:-langfuse}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_DB_USER:-langfuse} -d ${LANGFUSE_DB_NAME:-langfuse}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - mb-proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---- Redis — caching & background-job queue for Langfuse ----
+  langfuse-redis:
+    image: redis:7-alpine
+    container_name: langfuse-redis
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only — never expose Redis publicly.
+      - "127.0.0.1:${LANGFUSE_REDIS_PORT:-6379}:6379"
+    volumes:
+      - langfuse-redis:/data
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - mb-proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---- Langfuse server — web UI + ingestion API ----
+  langfuse:
+    image: langfuse/langfuse:2.0.0
+    container_name: langfuse
+    restart: unless-stopped
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+    ports:
+      # Bind to loopback only — expose publicly only through a reverse proxy
+      # (Caddy/Traefik from network-toolkit) with authentication.
+      - "127.0.0.1:${LANGFUSE_PORT:-3001}:3000"
+    environment:
+      # ---- Database ----
+      # Postgres connection string. Uses the internal service name so traffic
+      # stays on the Docker network.
+      DATABASE_URL: postgresql://${LANGFUSE_DB_USER:-langfuse}:${LANGFUSE_DB_PASSWORD:-langfuse-change-me}@langfuse-db:5432/${LANGFUSE_DB_NAME:-langfuse}
+      # ---- Redis ----
+      REDIS_URL: redis://langfuse-redis:6379
+      # ---- Auth (NextAuth) ----
+      # Secret used to sign session JWTs. Generate with:
+      #   openssl rand -hex 32
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-nextauth-secret-change-me}
+      # Public-facing base URL of the Langfuse UI. When behind a reverse proxy
+      # set this to https://<your-domain>; for local-only use the loopback URL.
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3001}
+      # ---- Encryption ----
+      # Salt key used to encrypt sensitive values (API keys stored in
+      # Langfuse). Generate with:  openssl rand -hex 32
+      SALT: ${LANGFUSE_SALT:-salt-change-me}
+      # ---- Misc ----
+      # Disable telemetry collection by Langfuse (self-hosted privacy).
+      LANGFUSE_TELEMETRY_DISABLED: ${LANGFUSE_TELEMETRY_DISABLED:-true}
+      # Log level: debug, info, warn, error.
+      LOG_LEVEL: ${LANGFUSE_LOG_LEVEL:-info}
+    networks:
+      - mb-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/public/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
