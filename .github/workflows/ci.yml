@@ -53,7 +53,10 @@ jobs:
               echo "FAIL $f"
               fail=$((fail + 1))
             fi
-          done < <(find . \( -name '*.yml' -o -name '*.yaml' \) -path './compose/*' -not -path './.git/*' -print0)
+          # *.yml files are compose files; *-config.yaml are application
+          # configs mounted into containers (e.g. litellm-config.yaml),
+          # not compose units.
+          done < <(find . -name '*.yml' -path './compose/*' -not -path './.git/*' -not -name '*-config.yaml' -print0)
           echo "compose config: $count valid, $fail failed"
           [ "$fail" -eq 0 ]
 
