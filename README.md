@@ -1,5 +1,7 @@
 # Self-Hosted AI on VPS - Ollama + Open WebUI in One Command
 
+
+[![CI](https://github.com/0x10debug/ai-workstation/actions/workflows/ci.yml/badge.svg)](https://github.com/0x10debug/ai-workstation/actions/workflows/ci.yml)
 Deploy your own private AI workstation on a VPS with **Ollama** and **Open WebUI** packaged in Docker. Run a self-hosted ChatGPT alternative on any CPU-only or NVIDIA GPU server, expose it through a Caddy reverse proxy with automatic HTTPS, and use the built-in OpenAI-compatible API from your own apps. Perfect for homelab, privacy, and full control over your models and data — no cloud bills, no rate limits, no vendor lock-in.
 
 Part of the [0x10debug](https://github.com/0x10debug) VPS tool suite.

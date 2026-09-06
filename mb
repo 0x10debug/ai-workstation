@@ -162,7 +162,8 @@ mb_ai_api() {
     local action="${1:-}"
     [[ $# -gt 0 ]] && shift
     local caddyfile="${MB_COMPOSE_DIR}/Caddyfile"
-    local env_file=$(mb_env_file)
+    local env_file
+    env_file=$(mb_env_file)
 
     case "${action}" in
         enable)
@@ -242,7 +243,8 @@ mb_ai_gpu() {
 
 mb_ai_update() {
     mb_check_docker
-    local env_file=$(mb_env_file)
+    local env_file
+    env_file=$(mb_env_file)
     local mode="cpu"
     if mb_gpu_check && docker inspect ollama >/dev/null 2>&1; then
         if docker inspect ollama 2>/dev/null | grep -q nvidia; then

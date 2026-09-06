@@ -275,7 +275,7 @@ Check remaining budget:
 
 ```bash
 curl http://127.0.0.1:4000/key/info \
-  -H "Authorization: Bearer sk-team-..."
+  -H "Authorization: Bearer <virtual-key>"
 ```
 
 Revoke a key:

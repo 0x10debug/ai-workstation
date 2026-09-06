@@ -5,13 +5,16 @@
 set -euo pipefail
 
 # ---- Version & paths ----
+# shellcheck disable=SC2034 # consumed by the mb entrypoint and compose paths
 MB_AI_VERSION="1.0.0"
 MB_AI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MB_COMPOSE_DIR="${MB_AI_DIR}/compose"
+# shellcheck disable=SC2034 # consumed by the mb entrypoint and compose paths
 MB_MODELS_DIR="${MB_AI_DIR}/models"
+# shellcheck disable=SC2034 # consumed by the mb entrypoint
 MB_RAG_DIR="${MB_AI_DIR}/rag"
+# shellcheck disable=SC2034 # consumed by the mb entrypoint and compose paths
 MB_DOCS_DIR="${MB_AI_DIR}/docs"
-MB_DEPLOY_DIR="/opt/mb-ai"
 
 # ---- Colors (disabled when not a TTY) ----
 if [[ -t 1 ]]; then
@@ -37,7 +40,7 @@ fi
 # ---- Logging ----
 mb_step()   { printf '%s==>%s %s%s%s\n' "${MB_C_BOLD}${MB_C_BLUE}" "${MB_C_RESET}" "${MB_C_BOLD}" "$*" "${MB_C_RESET}"; }
 mb_info()   { printf '%s[i]%s %s\n' "${MB_C_CYAN}" "${MB_C_RESET}" "$*"; }
-mb_detail() { printf '%s    %s%s%s\n' "${MB_C_GRAY}" "$*" "${MB_C_RESET}"; }
+mb_detail() { printf '%s    %s%s\n' "${MB_C_GRAY}" "$*" "${MB_C_RESET}"; }
 mb_success(){ printf '%s[OK]%s %s\n' "${MB_C_GREEN}" "${MB_C_RESET}" "$*"; }
 mb_warn()   { printf '%s[!]%s %s\n' "${MB_C_YELLOW}" "${MB_C_RESET}" "$*" >&2; }
 mb_error()  { printf '%s[ERR]%s %s\n' "${MB_C_RED}" "${MB_C_RESET}" "$*" >&2; }

@@ -1,0 +1,11 @@
+# Gitleaks configuration for ai-workstation.
+# Extends the default rule set; only narrows historical documentation text.
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Historical docs example showing a LiteLLM virtual key placeholder (rewritten to <virtual-key> in current files)"
+  commits = [
+    "3f205a266d494bf97efa0c9074798a2b2f543d0e",
+  ]
